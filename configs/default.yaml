@@ -1,0 +1,32 @@
+project:
+  name: football-ai
+  output_directory: output
+
+video:
+  input: videos/Test4k.mp4
+  start_seconds: 0
+  duration_seconds: 10
+
+detection:
+  model: rf-detr-medium
+  model_threshold: 0.05
+  person_threshold: 0.30
+  ball_threshold: 0.08
+
+tracking:
+  persons:
+    enabled: true
+    lost_track_buffer: 30
+    minimum_matching_threshold: 0.80
+
+  ball:
+    enabled: true
+    lost_track_buffer: 60
+    minimum_matching_threshold: 0.60
+
+field_filter:
+  enabled: false
+
+visualization:
+  show_confidence: true
+  show_track_ids: true

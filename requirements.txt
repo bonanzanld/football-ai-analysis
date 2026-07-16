@@ -1,0 +1,6 @@
+numpy
+opencv-python
+rfdetr
+supervision
+torch
+torchvision

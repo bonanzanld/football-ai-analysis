@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Large project files
+videos/*
+output/*
+frames/*
+models/*
+data/raw/*
+data/processed/*
+
+# Keep empty folders
+!videos/.gitkeep
+!output/.gitkeep
+!frames/.gitkeep
+!models/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Model weights
+*.pth
+*.pt
+*.onnx
+
+# Logs
+*.log

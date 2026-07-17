@@ -24,10 +24,10 @@ def main() -> None:
 
     output_path = Path(
         "output/"
-        "brandevoortbrab_tracking_test.mp4"
+        "brandevoortbrab_player_filter_test.mp4"
     )
 
-    max_seconds = 10
+    max_seconds = 20
 
     detector = FootballDetector(
         player_threshold=0.20,
@@ -45,7 +45,7 @@ def main() -> None:
     )
 
     print()
-    print("✅ Trackingtest gereed")
+    print("✅ PlayerFilter-test gereed")
     print(
         f"✅ Frames verwerkt: "
         f"{frames_processed}"

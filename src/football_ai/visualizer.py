@@ -5,15 +5,30 @@ import numpy as np
 import supervision as sv
 
 
+TEAM_COLORS: dict[int, tuple[int, int, int]] = {
+    0: (255, 100, 0),
+    1: (0, 0, 255),
+}
+
+UNKNOWN_COLOR = (0, 255, 255)
+
+
 def draw_tracked_players(
     frame: np.ndarray,
     tracked_players: sv.Detections,
+    team_by_tracker_id: dict[int, int] | None = None,
 ) -> np.ndarray:
     annotated_frame = frame.copy()
 
-    for index in range(len(tracked_players)):
+    if team_by_tracker_id is None:
+        team_by_tracker_id = {}
+
+    for index in range(
+        len(tracked_players)
+    ):
         x1, y1, x2, y2 = (
-            tracked_players.xyxy[index].astype(int)
+            tracked_players.xyxy[index]
+            .astype(int)
         )
 
         confidence = float(
@@ -27,15 +42,34 @@ def draw_tracked_players(
                 tracked_players.tracker_id[index]
             )
 
-        if tracker_id is None:
-            label = f"Player {confidence:.2f}"
-        else:
-            label = (
-                f"Player {tracker_id} "
-                f"{confidence:.2f}"
+        team_id = None
+
+        if tracker_id is not None:
+            team_id = team_by_tracker_id.get(
+                tracker_id
             )
 
-        color = (0, 255, 0)
+        if team_id is None:
+            color = UNKNOWN_COLOR
+            team_label = "Team ?"
+        else:
+            color = TEAM_COLORS.get(
+                team_id,
+                UNKNOWN_COLOR,
+            )
+            team_label = f"Team {team_id + 1}"
+
+        if tracker_id is None:
+            label = (
+                f"{team_label} "
+                f"{confidence:.2f}"
+            )
+        else:
+            label = (
+                f"ID {tracker_id} "
+                f"{team_label} "
+                f"{confidence:.2f}"
+            )
 
         cv2.rectangle(
             annotated_frame,

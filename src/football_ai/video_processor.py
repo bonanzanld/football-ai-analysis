@@ -4,7 +4,11 @@ from pathlib import Path
 
 import cv2
 
+from football_ai.classification.team_classifier import (
+    TeamClassifier,
+)
 from football_ai.detector import FootballDetector
+from football_ai.player_filter import PlayerFilter
 from football_ai.tracker import FootballTracker
 from football_ai.visualizer import draw_tracked_players
 
@@ -15,6 +19,20 @@ class VideoProcessor:
         detector: FootballDetector,
     ) -> None:
         self.detector = detector
+
+        self.player_filter = PlayerFilter(
+            minimum_box_height=24,
+            minimum_aspect_ratio=1.15,
+            maximum_aspect_ratio=6.0,
+            minimum_foot_y_ratio=0.15,
+            minimum_green_ratio=0.18,
+        )
+
+        self.team_classifier = TeamClassifier(
+            samples_per_player=30,
+            minimum_players=4,
+            refit_interval=30,
+        )
 
     def process(
         self,
@@ -93,8 +111,7 @@ class VideoProcessor:
             while True:
                 if (
                     frames_to_process is not None
-                    and frame_number
-                    >= frames_to_process
+                    and frame_number >= frames_to_process
                 ):
                     break
 
@@ -109,18 +126,33 @@ class VideoProcessor:
                     _ball_detections,
                 ) = self.detector.detect(frame)
 
-                tracked_players = tracker.update(
-                    player_detections
-                )
-
-                annotated_frame = (
-                    draw_tracked_players(
-                        frame,
-                        tracked_players,
+                filtered_player_detections = (
+                    self.player_filter.filter(
+                        frame=frame,
+                        detections=player_detections,
                     )
                 )
 
-                writer.write(annotated_frame)
+                tracked_players = tracker.update(
+                    filtered_player_detections
+                )
+
+                team_by_tracker_id = (
+                    self.team_classifier.update(
+                        frame=frame,
+                        tracked_players=tracked_players,
+                    )
+                )
+
+                annotated_frame = draw_tracked_players(
+                    frame=frame,
+                    tracked_players=tracked_players,
+                    team_by_tracker_id=team_by_tracker_id,
+                )
+
+                writer.write(
+                    annotated_frame
+                )
 
                 frame_number += 1
 

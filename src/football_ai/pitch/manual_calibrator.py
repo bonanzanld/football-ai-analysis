@@ -32,8 +32,8 @@ class LandmarkObservation:
 
 class OpenCvCalibrationApp:
     WINDOW_NAME = "Football AI - veldkalibratie"
-    SIDEBAR_WIDTH = 360
-    WINDOW_WIDTH = 1500
+    SIDEBAR_WIDTH = 440
+    WINDOW_WIDTH = 1640
     WINDOW_HEIGHT = 900
 
     def __init__(
@@ -151,11 +151,32 @@ class OpenCvCalibrationApp:
             self._select_next_landmark()
         elif key in (10, 13):
             unique_landmarks = {item.landmark_key for item in self.observations}
+
             if len(unique_landmarks) < 4:
                 self.status_message = (
                     "Markeer minimaal vier verschillende veldpunten."
                 )
                 return
+
+            missing_keys = [
+                key
+                for key in self.landmarks
+                if key not in unique_landmarks
+            ]
+
+            if missing_keys:
+                missing_names = ", ".join(
+                    self.landmarks[key].name
+                    for key in missing_keys
+                )
+
+                if not self.status_message.startswith("WAARSCHUWING:"):
+                    self.status_message = (
+                        "WAARSCHUWING: ontbrekend: "
+                        f"{missing_names}. Druk nogmaals Enter om toch door te gaan."
+                    )
+                    return
+
             self.finished = True
 
     def _mouse_callback(
@@ -368,7 +389,7 @@ class OpenCvCalibrationApp:
             self.status_message,
             x=24,
             y=self.WINDOW_HEIGHT - 75,
-            max_width=310,
+            max_width=self.SIDEBAR_WIDTH - 48,
             line_height=22,
             color=(230, 230, 230),
         )
@@ -440,8 +461,30 @@ class OpenCvCalibrationApp:
             )
             y += 22
 
+
     def _draw_annotate_sidebar(self, canvas: np.ndarray, y: int) -> None:
         selected = self.selected_frames[self.annotation_frame_index]
+
+        current_marked = {
+            item.landmark_key
+            for item in self.observations
+            if item.frame_index == self.annotation_frame_index
+        }
+
+        total_counts = {
+            key: sum(
+                1
+                for item in self.observations
+                if item.landmark_key == key
+            )
+            for key in self.landmarks
+        }
+
+        completed_landmarks = sum(
+            1 for count in total_counts.values() if count > 0
+        )
+        total_observations = len(self.observations)
+        completion_ratio = completed_landmarks / max(1, len(self.landmarks))
 
         self._text(
             canvas,
@@ -454,13 +497,84 @@ class OpenCvCalibrationApp:
             (255, 255, 255),
             1,
         )
-        y += 34
+        y += 28
+
+        self._text(
+            canvas,
+            (
+                f"TOTAAL: {completed_landmarks}/{len(self.landmarks)} punten  |  "
+                f"{total_observations} waarnemingen"
+            ),
+            (24, y),
+            0.46,
+            (0, 220, 255),
+            1,
+        )
+        y += 14
+
+        bar_x = 24
+        bar_y = y
+        bar_w = self.SIDEBAR_WIDTH - 48
+        bar_h = 12
+
+        cv2.rectangle(
+            canvas,
+            (bar_x, bar_y),
+            (bar_x + bar_w, bar_y + bar_h),
+            (80, 80, 80),
+            thickness=-1,
+        )
+        cv2.rectangle(
+            canvas,
+            (bar_x, bar_y),
+            (
+                bar_x + int(round(bar_w * completion_ratio)),
+                bar_y + bar_h,
+            ),
+            (70, 200, 70),
+            thickness=-1,
+        )
+        y += 22
+
+        indicator_spacing = 42
+        indicator_start_x = 42
+        indicator_y = y + 10
+
+        for index, key in enumerate(self.landmarks):
+            count = total_counts[key]
+
+            if count == 0:
+                indicator_color = (115, 115, 115)
+            elif count == 1:
+                indicator_color = (0, 220, 255)
+            else:
+                indicator_color = (70, 200, 70)
+
+            indicator_x = indicator_start_x + index * indicator_spacing
+            cv2.circle(
+                canvas,
+                (indicator_x, indicator_y),
+                13,
+                indicator_color,
+                thickness=-1,
+                lineType=cv2.LINE_AA,
+            )
+            self._text(
+                canvas,
+                str(key),
+                (indicator_x - 5, indicator_y + 5),
+                0.42,
+                (20, 20, 20),
+                1,
+            )
+
+        y += 31
 
         self._draw_pitch_diagram(canvas, top=y)
-        y += 220
+        y += 185
 
         if self.current_landmark_key is None:
-            current_text = "Alle zichtbare punten afgewerkt."
+            current_text = "NU: alle zichtbare punten in dit frame afgewerkt"
         else:
             current_text = (
                 f"NU: {self.landmarks[self.current_landmark_key].name}"
@@ -471,57 +585,114 @@ class OpenCvCalibrationApp:
             current_text,
             24,
             y,
-            310,
-            22,
+            self.SIDEBAR_WIDTH - 48,
+            20,
             (0, 220, 255),
         )
-        y += 48
+        y += 42
 
-        marked = {
-            item.landmark_key
-            for item in self.observations
-            if item.frame_index == self.annotation_frame_index
-        }
+        self._text(
+            canvas,
+            "HUIDIG FRAME",
+            (24, y),
+            0.48,
+            (255, 255, 255),
+            2,
+        )
+        y += 22
 
         for key, landmark in self.landmarks.items():
-            prefix = "[x]" if key in marked else "[ ]"
+            prefix = "[x]" if key in current_marked else "[ ]"
             color = (
                 (0, 220, 255)
                 if key == self.current_landmark_key
-                else (220, 220, 220)
+                else (
+                    (70, 200, 70)
+                    if key in current_marked
+                    else (210, 210, 210)
+                )
             )
             self._text(
                 canvas,
                 f"{prefix} {key}. {landmark.name}",
                 (24, y),
-                0.43,
+                0.40,
                 color,
                 1,
             )
-            y += 23
+            y += 19
+
+        y += 4
+        self._text(
+            canvas,
+            "TOTAALOVERZICHT",
+            (24, y),
+            0.48,
+            (255, 255, 255),
+            2,
+        )
+        y += 22
+
+        for key, landmark in self.landmarks.items():
+            count = total_counts[key]
+
+            if count == 0:
+                marker = "[ ]"
+                color = (120, 120, 120)
+            elif count == 1:
+                marker = "[1]"
+                color = (0, 220, 255)
+            else:
+                marker = "[x]"
+                color = (70, 200, 70)
+
+            self._text(
+                canvas,
+                f"{marker} {key}. {landmark.name:<30} {count}x",
+                (24, y),
+                0.38,
+                color,
+                1,
+            )
+            y += 18
 
         y += 10
+
+        controls_y = self.WINDOW_HEIGHT - 112
         controls = [
-            "1-8 = punt kiezen",
-            "Klik = punt plaatsen",
-            "K = punt overslaan",
-            "U / Backspace = laatste punt weg",
-            "R = dit frame leegmaken",
-            "P / N = vorig / volgend frame",
-            "Enter = kalibratie berekenen",
+            "1-8 punt | klik plaatsen | K overslaan",
+            "U undo | R frame leeg | P/N frame",
+            "Enter berekenen | Esc stoppen",
         ]
 
         for line in controls:
-            self._text(canvas, line, (24, y), 0.43, (190, 190, 190), 1)
-            y += 21
+            self._text(
+                canvas,
+                line,
+                (24, controls_y),
+                0.38,
+                (185, 185, 185),
+                1,
+            )
+            controls_y += 19
+
+
 
     def _draw_pitch_diagram(self, canvas: np.ndarray, top: int) -> None:
-        left = 55
-        right = 305
-        pitch_top = top + 28
-        pitch_bottom = top + 155
+        left = 78
+        right = self.SIDEBAR_WIDTH - 78
+        pitch_top = top + 24
+        pitch_bottom = top + 130
 
-        self._text(canvas, "ACHTER", (142, top + 16), 0.45, (230, 230, 230), 1)
+        self._text(
+            canvas,
+            "ACHTER",
+            (self.SIDEBAR_WIDTH // 2 - 36, top + 14),
+            0.42,
+            (230, 230, 230),
+            1,
+        )
+
         cv2.rectangle(
             canvas,
             (left, pitch_top),
@@ -536,11 +707,12 @@ class OpenCvCalibrationApp:
             (100, 100, 100),
             1,
         )
+
         self._text(
             canvas,
             "CAMERA / VOOR",
-            (112, pitch_bottom + 28),
-            0.42,
+            (self.SIDEBAR_WIDTH // 2 - 66, pitch_bottom + 24),
+            0.40,
             (230, 230, 230),
             1,
         )
@@ -550,25 +722,32 @@ class OpenCvCalibrationApp:
             2: (right, pitch_top),
             3: (left, pitch_bottom),
             4: (right, pitch_bottom),
-            5: (left, pitch_top + 42),
-            6: (left, pitch_top + 84),
-            7: (right, pitch_top + 84),
-            8: (right, pitch_top + 42),
+            5: (left, pitch_top + 35),
+            6: (left, pitch_top + 72),
+            7: (right, pitch_top + 72),
+            8: (right, pitch_top + 35),
         }
 
-        marked = {
+        current_marked = {
             item.landmark_key
             for item in self.observations
             if item.frame_index == self.annotation_frame_index
         }
 
+        total_marked = {
+            item.landmark_key
+            for item in self.observations
+        }
+
         for key, point in positions.items():
             if key == self.current_landmark_key:
                 color = (0, 220, 255)
-            elif key in marked:
+            elif key in current_marked:
                 color = (70, 200, 70)
+            elif key in total_marked:
+                color = (0, 165, 255)
             else:
-                color = (150, 150, 150)
+                color = (115, 115, 115)
 
             cv2.circle(canvas, point, 10, color, -1, cv2.LINE_AA)
             self._text(
@@ -579,6 +758,9 @@ class OpenCvCalibrationApp:
                 (20, 20, 20),
                 1,
             )
+
+
+
 
     def _draw_video(self, canvas: np.ndarray) -> None:
         if self.current_frame is None:

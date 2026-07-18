@@ -989,6 +989,7 @@ class MultiFramePitchCalibrator:
             source_time_seconds=reference.time_seconds,
             frame_width=frame_width,
             frame_height=frame_height,
+            quality=self.quality_report,
         )
 
     def create_preview(

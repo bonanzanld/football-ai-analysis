@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from football_ai.calibration.quality_report import CalibrationQualityReport
+
 from .field_model import PitchProfile
 
 
@@ -32,6 +34,7 @@ class PitchCalibration:
 
     frame_width: int
     frame_height: int
+    quality: CalibrationQualityReport | None = None
 
     def __post_init__(self) -> None:
         self.image_corners = np.asarray(
@@ -65,7 +68,7 @@ class PitchCalibration:
             )
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "profile": self.profile.to_dict(),
             "image_corners": self.image_corners.tolist(),
             "image_to_pitch_matrix": (
@@ -80,6 +83,9 @@ class PitchCalibration:
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
         }
+        if self.quality is not None:
+            data["quality"] = self.quality.to_dict()
+        return data
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(
@@ -142,5 +148,10 @@ class PitchCalibration:
             ),
             frame_height=int(
                 data["frame_height"]
+            ),
+            quality=(
+                CalibrationQualityReport.from_dict(data["quality"])
+                if data.get("quality") is not None
+                else None
             ),
         )

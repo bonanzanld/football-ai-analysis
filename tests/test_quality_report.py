@@ -47,6 +47,20 @@ class CalculateQualityReportTests(unittest.TestCase):
         )
         self.assertEqual(report.inlier_points.max_error, 5.0)
 
+    def test_json_dictionary_round_trip_preserves_report(self) -> None:
+        report = calculate_quality_report(
+            image_points=np.array([[0.0, 0.0], [3.0, 4.0]]),
+            pitch_points=np.array([[0.0, 0.0], [0.0, 0.0]]),
+            image_to_pitch_matrix=np.eye(3),
+            inlier_mask=np.array([1, 0]),
+        )
+
+        restored = type(report).from_dict(report.to_dict())
+
+        self.assertEqual(restored, report)
+        self.assertEqual(report.to_dict()["inliers"], 1)
+        self.assertEqual(report.to_dict()["outliers"], 1)
+
     def test_missing_mask_treats_every_point_as_inlier(self) -> None:
         points = np.array([[1.0, 2.0], [3.0, 4.0]])
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import cv2
 import numpy as np
@@ -16,6 +17,25 @@ class ErrorStatistics:
     rms_error: float | None
     max_error: float | None
 
+    def to_dict(self) -> dict[str, int | float | None]:
+        return {
+            "point_count": self.point_count,
+            "mean_error": self.mean_error,
+            "median_error": self.median_error,
+            "rms_error": self.rms_error,
+            "max_error": self.max_error,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ErrorStatistics:
+        return cls(
+            point_count=int(data["point_count"]),
+            mean_error=_optional_float(data.get("mean_error")),
+            median_error=_optional_float(data.get("median_error")),
+            rms_error=_optional_float(data.get("rms_error")),
+            max_error=_optional_float(data.get("max_error")),
+        )
+
 
 @dataclass(frozen=True)
 class PointReprojectionError:
@@ -27,6 +47,36 @@ class PointReprojectionError:
     reprojected_image_point: tuple[float, float]
     error_pixels: float
     is_inlier: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "point_index": self.point_index,
+            "observed_image_point": list(self.observed_image_point),
+            "expected_pitch_point": list(self.expected_pitch_point),
+            "reprojected_image_point": list(self.reprojected_image_point),
+            "error_pixels": self.error_pixels,
+            "is_inlier": self.is_inlier,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PointReprojectionError:
+        return cls(
+            point_index=int(data["point_index"]),
+            observed_image_point=_point_from_json(
+                data["observed_image_point"],
+                "observed_image_point",
+            ),
+            expected_pitch_point=_point_from_json(
+                data["expected_pitch_point"],
+                "expected_pitch_point",
+            ),
+            reprojected_image_point=_point_from_json(
+                data["reprojected_image_point"],
+                "reprojected_image_point",
+            ),
+            error_pixels=float(data["error_pixels"]),
+            is_inlier=bool(data["is_inlier"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -42,6 +92,30 @@ class CalibrationQualityReport:
     @property
     def point_count(self) -> int:
         return len(self.point_errors)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "point_errors": [
+                point_error.to_dict() for point_error in self.point_errors
+            ],
+            "all_points": self.all_points.to_dict(),
+            "inlier_points": self.inlier_points.to_dict(),
+            "inliers": self.inlier_count,
+            "outliers": self.outlier_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CalibrationQualityReport:
+        return cls(
+            point_errors=tuple(
+                PointReprojectionError.from_dict(point_error)
+                for point_error in data["point_errors"]
+            ),
+            all_points=ErrorStatistics.from_dict(data["all_points"]),
+            inlier_points=ErrorStatistics.from_dict(data["inlier_points"]),
+            inlier_count=int(data["inliers"]),
+            outlier_count=int(data["outliers"]),
+        )
 
 
 def calculate_quality_report(
@@ -163,3 +237,14 @@ def _calculate_statistics(errors: np.ndarray) -> ErrorStatistics:
 
 def _as_point(point: np.ndarray) -> tuple[float, float]:
     return float(point[0]), float(point[1])
+
+
+def _point_from_json(value: Any, name: str) -> tuple[float, float]:
+    point = np.asarray(value, dtype=np.float64)
+    if point.shape != (2,) or not np.all(np.isfinite(point)):
+        raise ValueError(f"{name} moet twee geldige coördinaten bevatten.")
+    return _as_point(point)
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)

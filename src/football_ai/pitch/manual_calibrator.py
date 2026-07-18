@@ -902,7 +902,6 @@ class MultiFramePitchCalibrator:
             landmarks=self.landmarks,
         )
         self.selected_frames, self.observations = app.run()
-        print(">>> DEBUG: calibrate_video() gebruikt mijn nieuwe code <<<")
         transforms = self._calculate_frame_transforms()
         self.frame_transforms = transforms
 
@@ -973,11 +972,8 @@ class MultiFramePitchCalibrator:
 
         reference = self.selected_frames[0]
         frame_height, frame_width = reference.frame.shape[:2]
-        inlier_count = int(mask.sum()) if mask is not None else len(image_array)
 
-        print(
-            f"Homography berekend met {inlier_count}/{len(image_array)} inliers."
-        )
+        print(self.quality_report.format_terminal_report())
 
         return PitchCalibration(
             profile=self.profile,

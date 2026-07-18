@@ -93,6 +93,57 @@ class CalibrationQualityReport:
     def point_count(self) -> int:
         return len(self.point_errors)
 
+    def format_terminal_report(self) -> str:
+        """Maak een compact, menselijk leesbaar terminalrapport."""
+        lines = [
+            "=" * 72,
+            "Kalibratiekwaliteit - reprojectiefout in pixels",
+            "=" * 72,
+            f"Controlepunten : {self.point_count}",
+            f"Inliers        : {self.inlier_count}",
+            f"Outliers       : {self.outlier_count}",
+            "-" * 72,
+            (
+                f"{'Statistiek':<16}"
+                f"{'Alle punten':>18}"
+                f"{'Alleen inliers':>20}"
+            ),
+            "-" * 72,
+        ]
+
+        metrics = (
+            ("Gemiddelde", "mean_error"),
+            ("Mediaan", "median_error"),
+            ("RMS", "rms_error"),
+            ("Maximum", "max_error"),
+        )
+        for label, attribute in metrics:
+            lines.append(
+                f"{label:<16}"
+                f"{_format_pixels(getattr(self.all_points, attribute)):>18}"
+                f"{_format_pixels(getattr(self.inlier_points, attribute)):>20}"
+            )
+
+        outliers = [
+            point_error
+            for point_error in self.point_errors
+            if not point_error.is_inlier
+        ]
+        lines.extend(["-" * 72, "Outlierdetails"])
+        if not outliers:
+            lines.append("Geen outliers gedetecteerd.")
+        else:
+            lines.extend(
+                (
+                    f"Punt {point_error.point_index + 1}: "
+                    f"{point_error.error_pixels:.1f} px"
+                )
+                for point_error in outliers
+            )
+
+        lines.append("=" * 72)
+        return "\n".join(lines)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "point_errors": [
@@ -248,3 +299,7 @@ def _point_from_json(value: Any, name: str) -> tuple[float, float]:
 
 def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
+
+
+def _format_pixels(value: float | None) -> str:
+    return "n.v.t." if value is None else f"{value:.1f} px"

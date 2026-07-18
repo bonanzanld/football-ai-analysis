@@ -61,6 +61,54 @@ class CalculateQualityReportTests(unittest.TestCase):
         self.assertEqual(report.to_dict()["inliers"], 1)
         self.assertEqual(report.to_dict()["outliers"], 1)
 
+    def test_terminal_report_shows_both_statistic_sets_and_outliers(self) -> None:
+        report = calculate_quality_report(
+            image_points=np.array(
+                [[0.0, 0.0], [3.0, 4.0], [20.0, 0.0]]
+            ),
+            pitch_points=np.zeros((3, 2)),
+            image_to_pitch_matrix=np.eye(3),
+            inlier_mask=np.array([1, 1, 0]),
+        )
+
+        output = report.format_terminal_report()
+
+        self.assertIn("Controlepunten : 3", output)
+        self.assertIn("Inliers        : 2", output)
+        self.assertIn("Outliers       : 1", output)
+        self.assertIn("Alle punten", output)
+        self.assertIn("Alleen inliers", output)
+        self.assertIn("Gemiddelde", output)
+        self.assertIn("Mediaan", output)
+        self.assertIn("RMS", output)
+        self.assertIn("Maximum", output)
+        self.assertIn("Punt 3: 20.0 px", output)
+
+    def test_terminal_report_handles_no_outliers(self) -> None:
+        points = np.array([[1.0, 2.0]])
+        report = calculate_quality_report(
+            image_points=points,
+            pitch_points=points,
+            image_to_pitch_matrix=np.eye(3),
+        )
+
+        output = report.format_terminal_report()
+
+        self.assertIn("Outliers       : 0", output)
+        self.assertIn("Geen outliers gedetecteerd.", output)
+
+    def test_terminal_report_handles_empty_inlier_statistics(self) -> None:
+        report = calculate_quality_report(
+            image_points=np.array([[1.0, 2.0]]),
+            pitch_points=np.array([[1.0, 2.0]]),
+            image_to_pitch_matrix=np.eye(3),
+            inlier_mask=np.array([0]),
+        )
+
+        output = report.format_terminal_report()
+
+        self.assertIn("n.v.t.", output)
+
     def test_missing_mask_treats_every_point_as_inlier(self) -> None:
         points = np.array([[1.0, 2.0], [3.0, 4.0]])
 

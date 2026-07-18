@@ -8,6 +8,8 @@ import numpy as np
 
 from football_ai.calibration.quality_report import (
     CalibrationQualityReport,
+    ErrorStatistics,
+    PointReprojectionError,
     calculate_quality_report,
 )
 from football_ai.pitch.panorama_builder import PanoramaBuilder
@@ -1100,9 +1102,7 @@ class MultiFramePitchCalibrator:
             self.profile.goal_b_posts,
         )
 
-        errors: list[float] = []
-
-        for observation in self.observations:
+        for observation_index, observation in enumerate(self.observations):
             if observation.frame_index >= len(self.frame_transforms):
                 continue
 
@@ -1136,19 +1136,25 @@ class MultiFramePitchCalibrator:
             ):
                 continue
 
-            error_pixels = float(
-                np.linalg.norm(clicked_canvas - predicted_canvas)
+            point_quality = self._get_point_quality(
+                calibration.quality,
+                observation_index,
             )
-            errors.append(error_pixels)
+            error_pixels = (
+                point_quality.error_pixels
+                if point_quality is not None
+                else float(np.linalg.norm(clicked_canvas - predicted_canvas))
+            )
 
             clicked_point = tuple(np.round(clicked_canvas).astype(int))
             predicted_point = tuple(np.round(predicted_canvas).astype(int))
 
-            error_color = (
-                (60, 210, 60)
-                if error_pixels <= 12.0
-                else (0, 0, 255)
-            )
+            if point_quality is None:
+                error_color = (0, 165, 255)
+            elif point_quality.is_inlier:
+                error_color = (60, 210, 60)
+            else:
+                error_color = (0, 0, 255)
 
             cv2.line(
                 panorama,
@@ -1200,7 +1206,7 @@ class MultiFramePitchCalibrator:
                 cv2.LINE_AA,
             )
 
-        self._draw_validation_legend(panorama, errors)
+        self._draw_quality_dashboard(panorama, calibration.quality)
         return panorama
 
     @staticmethod
@@ -1374,14 +1380,14 @@ class MultiFramePitchCalibrator:
         )
 
     @staticmethod
-    def _draw_validation_legend(
+    def _draw_quality_dashboard(
         image: np.ndarray,
-        errors: list[float],
+        quality: CalibrationQualityReport | None,
     ) -> None:
         panel_x = 18
         panel_y = 18
-        panel_w = 500
-        panel_h = 142
+        panel_w = min(700, max(300, image.shape[1] - 36))
+        panel_h = min(300, max(180, image.shape[0] - 36))
 
         overlay = image.copy()
         cv2.rectangle(
@@ -1393,64 +1399,133 @@ class MultiFramePitchCalibrator:
         )
         cv2.addWeighted(overlay, 0.78, image, 0.22, 0.0, image)
 
-        cv2.putText(
-            image,
-            "KALIBRATIEPANORAMA",
-            (panel_x + 14, panel_y + 27),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.68,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
+        x = panel_x + 16
+        y = panel_y + 30
+        MultiFramePitchCalibrator._dashboard_text(
+            image, "KALIBRATIE QA", (x, y), 0.72, (255, 255, 255), 2
         )
-        cv2.putText(
+        MultiFramePitchCalibrator._dashboard_text(
             image,
-            "Geel = klik | magenta = voorspeld | cyaan = veldrand/middenlijn",
-            (panel_x + 14, panel_y + 57),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            "Geel = klik | magenta = voorspeld | groen = inlier | rood = outlier",
+            (x, y + 30),
             0.45,
             (225, 225, 225),
             1,
-            cv2.LINE_AA,
         )
 
-        if errors:
-            mean_error = float(np.mean(errors))
-            max_error = float(np.max(errors))
-            status = "GOED" if max_error <= 12.0 else "CONTROLEREN"
-            status_color = (
-                (60, 210, 60)
-                if status == "GOED"
-                else (0, 0, 255)
+        if quality is None:
+            MultiFramePitchCalibrator._dashboard_text(
+                image,
+                "Geen kwaliteitsrapport beschikbaar.",
+                (x, y + 72),
+                0.55,
+                (0, 165, 255),
+                2,
             )
-            summary = (
-                f"Gemiddeld {mean_error:.1f}px | "
-                f"maximaal {max_error:.1f}px | {status}"
-            )
-        else:
-            status_color = (0, 165, 255)
-            summary = "Geen waarnemingen beschikbaar voor validatie."
+            return
 
-        cv2.putText(
+        MultiFramePitchCalibrator._dashboard_text(
             image,
-            summary,
-            (panel_x + 14, panel_y + 90),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
-            status_color,
+            (
+                f"Punten {quality.point_count}   |   "
+                f"Inliers {quality.inlier_count}   |   "
+                f"Outliers {quality.outlier_count}"
+            ),
+            (x, y + 72),
+            0.58,
+            (255, 255, 255),
             2,
-            cv2.LINE_AA,
         )
+
+        columns = ("Gem.", "Mediaan", "RMS", "Max.")
+        column_x = (x + 250, x + 360, x + 475, x + 580)
+        for label, label_x in zip(columns, column_x):
+            MultiFramePitchCalibrator._dashboard_text(
+                image,
+                label,
+                (label_x, y + 116),
+                0.43,
+                (190, 190, 190),
+                1,
+            )
+
+        MultiFramePitchCalibrator._draw_dashboard_statistics_row(
+            image,
+            "Alle punten",
+            quality.all_points,
+            x,
+            y + 153,
+            column_x,
+        )
+        MultiFramePitchCalibrator._draw_dashboard_statistics_row(
+            image,
+            "Alleen inliers",
+            quality.inlier_points,
+            x,
+            y + 190,
+            column_x,
+        )
+        MultiFramePitchCalibrator._dashboard_text(
+            image,
+            "Fouten in pixels; kwaliteitsstatus volgt in Sprint 2.5.",
+            (x, y + 235),
+            0.43,
+            (190, 190, 190),
+            1,
+        )
+
+    @staticmethod
+    def _draw_dashboard_statistics_row(
+        image: np.ndarray,
+        label: str,
+        statistics: ErrorStatistics,
+        x: int,
+        y: int,
+        column_x: tuple[int, int, int, int],
+    ) -> None:
+        MultiFramePitchCalibrator._dashboard_text(
+            image, label, (x, y), 0.48, (235, 235, 235), 1
+        )
+        values = (
+            statistics.mean_error,
+            statistics.median_error,
+            statistics.rms_error,
+            statistics.max_error,
+        )
+        for value, value_x in zip(values, column_x):
+            text = "n.v.t." if value is None else f"{value:.1f} px"
+            MultiFramePitchCalibrator._dashboard_text(
+                image, text, (value_x, y), 0.45, (255, 255, 255), 1
+            )
+
+    @staticmethod
+    def _dashboard_text(
+        image: np.ndarray,
+        text: str,
+        origin: tuple[int, int],
+        scale: float,
+        color: tuple[int, int, int],
+        thickness: int,
+    ) -> None:
         cv2.putText(
             image,
-            "Controleer aansluiting frames, beide doelen, zijlijnen en middenlijn.",
-            (panel_x + 14, panel_y + 122),
+            text,
+            origin,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            (225, 225, 225),
-            1,
+            scale,
+            color,
+            thickness,
             cv2.LINE_AA,
         )
+
+    @staticmethod
+    def _get_point_quality(
+        quality: CalibrationQualityReport | None,
+        point_index: int,
+    ) -> PointReprojectionError | None:
+        if quality is None or point_index >= len(quality.point_errors):
+            return None
+        return quality.point_errors[point_index]
 
     def _create_landmark_definitions(self) -> dict[int, LandmarkDefinition]:
         width = float(self.profile.width_m)

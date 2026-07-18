@@ -113,6 +113,7 @@ class FieldProjector:
     def project_point(
         self,
         image_point: tuple[float, float],
+        frame_number: int | None = None,
     ) -> FieldPosition | None:
         """
         Projecteer één beeldpunt naar een positie op het veld.
@@ -137,6 +138,7 @@ class FieldProjector:
         projected_point = (
             self._project_single_point(
                 image_point=validated_image_point,
+                frame_number=frame_number,
             )
         )
 
@@ -155,6 +157,7 @@ class FieldProjector:
         bounding_box: np.ndarray
         | tuple[float, float, float, float]
         | list[float],
+        frame_number: int | None = None,
     ) -> FieldPosition | None:
         """
         Projecteer het voetpunt van een bounding box.
@@ -199,6 +202,7 @@ class FieldProjector:
 
         return self.project_point(
             image_point=foot_point,
+            frame_number=frame_number,
         )
 
     def project_points(
@@ -206,6 +210,7 @@ class FieldProjector:
         image_points: Sequence[
             tuple[float, float]
         ],
+        frame_number: int | None = None,
     ) -> list[FieldPosition | None]:
         """
         Projecteer meerdere beeldpunten.
@@ -225,6 +230,7 @@ class FieldProjector:
             results.append(
                 self.project_point(
                     image_point=image_point,
+                    frame_number=frame_number,
                 )
             )
 
@@ -337,6 +343,7 @@ class FieldProjector:
     def _project_single_point(
         self,
         image_point: tuple[float, float],
+        frame_number: int | None = None,
     ) -> tuple[float, float] | None:
         """
         Voer de daadwerkelijke homografieprojectie uit.
@@ -358,7 +365,11 @@ class FieldProjector:
         )
 
         matrix = np.asarray(
-            self.calibration.image_to_pitch_matrix,
+            self.calibration.image_to_pitch_for_frame(
+                frame_number
+                if frame_number is not None
+                else self.calibration.source_frame_number
+            ),
             dtype=np.float64,
         )
 

@@ -6,6 +6,7 @@ import numpy as np
 
 from football_ai.calibration.quality_report import (
     ControlPointContext,
+    assess_calibration_quality,
     calculate_quality_report,
 )
 from football_ai.pitch.manual_calibrator import MultiFramePitchCalibrator
@@ -24,6 +25,7 @@ class QualityDashboardTests(unittest.TestCase):
                 ControlPointContext(4, "Hoek rechtsvoor", 2, 300),
             ],
         )
+        report = assess_calibration_quality(report, 42.5, 64.0)
 
         MultiFramePitchCalibrator._draw_quality_dashboard(image, report)
 
@@ -37,6 +39,10 @@ class QualityDashboardTests(unittest.TestCase):
                 report.point_errors[1]
             ),
             "Hoek rechtsvoor | F3 | 5.0 px",
+        )
+        self.assertIn(
+            "STATUS FAIL",
+            MultiFramePitchCalibrator._format_dashboard_assessment(report),
         )
 
     def test_draws_fallback_for_legacy_calibration(self) -> None:

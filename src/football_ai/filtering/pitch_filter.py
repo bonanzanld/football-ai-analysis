@@ -47,6 +47,7 @@ class PitchFilter:
         bounding_box: np.ndarray,
         frame_width: int,
         frame_height: int,
+        frame_number: int | None = None,
     ) -> bool:
         ground_points = self._ground_contact_points(
             bounding_box=bounding_box,
@@ -56,6 +57,7 @@ class PitchFilter:
             image_points=ground_points,
             frame_width=frame_width,
             frame_height=frame_height,
+            frame_number=frame_number,
         )
 
         if pitch_points is None:
@@ -94,6 +96,7 @@ class PitchFilter:
         image_points: np.ndarray,
         frame_width: int,
         frame_height: int,
+        frame_number: int | None = None,
     ) -> np.ndarray | None:
         if frame_width <= 0 or frame_height <= 0:
             return None
@@ -121,7 +124,11 @@ class PitchFilter:
 
         transformed = cv2.perspectiveTransform(
             scaled_points.reshape(-1, 1, 2),
-            self.calibration.image_to_pitch_matrix,
+            self.calibration.image_to_pitch_for_frame(
+                frame_number
+                if frame_number is not None
+                else self.calibration.source_frame_number
+            ),
         ).reshape(-1, 2)
 
         if not np.all(np.isfinite(transformed)):

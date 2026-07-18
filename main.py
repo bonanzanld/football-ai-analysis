@@ -56,6 +56,7 @@ def main() -> None:
     calibration = PitchCalibration.load(
         calibration_path
     )
+    calibration.require_usable()
 
     detector = FootballDetector(
         player_threshold=0.20,

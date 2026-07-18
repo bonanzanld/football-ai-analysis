@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, Sequence
 
 import cv2
@@ -15,6 +16,61 @@ class ControlPointContext:
     landmark_name: str
     frame_index: int
     frame_number: int
+
+
+class CalibrationStatus(str, Enum):
+    PASS = "PASS"
+    WARNING = "WARNING"
+    FAIL = "FAIL"
+
+
+@dataclass(frozen=True)
+class QualityAssessment:
+    """Uitlegbare bruikbaarheidsbeoordeling van een kalibratie."""
+
+    status: CalibrationStatus
+    confidence_score: float
+    inlier_ratio: float
+    width_coverage: float
+    length_coverage: float
+    hull_coverage: float
+    selected_frame_count: int | None
+    non_redundant_frame_count: int | None
+    failures: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "confidence_score": self.confidence_score,
+            "inlier_ratio": self.inlier_ratio,
+            "width_coverage": self.width_coverage,
+            "length_coverage": self.length_coverage,
+            "hull_coverage": self.hull_coverage,
+            "selected_frame_count": self.selected_frame_count,
+            "non_redundant_frame_count": self.non_redundant_frame_count,
+            "failures": list(self.failures),
+            "warnings": list(self.warnings),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QualityAssessment:
+        return cls(
+            status=CalibrationStatus(data["status"]),
+            confidence_score=float(data["confidence_score"]),
+            inlier_ratio=float(data["inlier_ratio"]),
+            width_coverage=float(data["width_coverage"]),
+            length_coverage=float(data["length_coverage"]),
+            hull_coverage=float(data["hull_coverage"]),
+            selected_frame_count=_optional_int(
+                data.get("selected_frame_count")
+            ),
+            non_redundant_frame_count=_optional_int(
+                data.get("non_redundant_frame_count")
+            ),
+            failures=tuple(str(reason) for reason in data.get("failures", [])),
+            warnings=tuple(str(reason) for reason in data.get("warnings", [])),
+        )
 
 
 @dataclass(frozen=True)
@@ -110,6 +166,7 @@ class CalibrationQualityReport:
     inlier_points: ErrorStatistics
     inlier_count: int
     outlier_count: int
+    assessment: QualityAssessment | None = None
 
     @property
     def point_count(self) -> int:
@@ -160,6 +217,32 @@ class CalibrationQualityReport:
                 for point_error in outliers
             )
 
+        if self.assessment is not None:
+            assessment = self.assessment
+            lines.extend(
+                [
+                    "-" * 72,
+                    (
+                        f"Status         : {assessment.status.value} | "
+                        f"Confidence {assessment.confidence_score:.1f}/100"
+                    ),
+                    (
+                        f"Dekking        : breedte "
+                        f"{assessment.width_coverage:.1%} | lengte "
+                        f"{assessment.length_coverage:.1%} | vlak "
+                        f"{assessment.hull_coverage:.1%}"
+                    ),
+                ]
+            )
+            if assessment.selected_frame_count is not None:
+                lines.append(
+                    "Unieke frames  : "
+                    f"{assessment.non_redundant_frame_count}/"
+                    f"{assessment.selected_frame_count}"
+                )
+            lines.extend(f"FAIL           : {reason}" for reason in assessment.failures)
+            lines.extend(f"WAARSCHUWING   : {reason}" for reason in assessment.warnings)
+
         lines.append("=" * 72)
         return "\n".join(lines)
 
@@ -172,6 +255,11 @@ class CalibrationQualityReport:
             "inlier_points": self.inlier_points.to_dict(),
             "inliers": self.inlier_count,
             "outliers": self.outlier_count,
+            "assessment": (
+                self.assessment.to_dict()
+                if self.assessment is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -185,6 +273,18 @@ class CalibrationQualityReport:
             inlier_points=ErrorStatistics.from_dict(data["inlier_points"]),
             inlier_count=int(data["inliers"]),
             outlier_count=int(data["outliers"]),
+            assessment=(
+                QualityAssessment.from_dict(data["assessment"])
+                if data.get("assessment") is not None
+                else None
+            ),
+        )
+
+    @property
+    def is_usable(self) -> bool:
+        return (
+            self.assessment is not None
+            and self.assessment.status is not CalibrationStatus.FAIL
         )
 
 
@@ -232,6 +332,39 @@ def calculate_quality_report(
     if not np.all(np.isfinite(reprojected)):
         raise ValueError("De homografie produceert ongeldige reprojectiepunten.")
 
+    return calculate_quality_from_predictions(
+        observed_image_points=observed,
+        expected_pitch_points=expected,
+        reprojected_image_points=reprojected,
+        inlier_mask=inliers,
+        point_contexts=contexts,
+    )
+
+
+def calculate_quality_from_predictions(
+    observed_image_points: np.ndarray,
+    expected_pitch_points: np.ndarray,
+    reprojected_image_points: np.ndarray,
+    inlier_mask: np.ndarray,
+    point_contexts: Sequence[ControlPointContext] | None = None,
+) -> CalibrationQualityReport:
+    observed = _validate_points(
+        observed_image_points,
+        "observed_image_points",
+    )
+    expected = _validate_points(
+        expected_pitch_points,
+        "expected_pitch_points",
+    )
+    reprojected = _validate_points(
+        reprojected_image_points,
+        "reprojected_image_points",
+    )
+    if not (len(observed) == len(expected) == len(reprojected)):
+        raise ValueError("Alle puntverzamelingen moeten even lang zijn.")
+    inliers = _normalise_inlier_mask(inlier_mask, len(observed))
+    contexts = _normalise_point_contexts(point_contexts, len(observed))
+
     errors = np.linalg.norm(observed - reprojected, axis=1)
     point_errors = tuple(
         PointReprojectionError(
@@ -264,6 +397,136 @@ def calculate_quality_report(
         inlier_count=int(np.count_nonzero(inliers)),
         outlier_count=int(np.count_nonzero(~inliers)),
     )
+
+
+def assess_calibration_quality(
+    report: CalibrationQualityReport,
+    pitch_width: float,
+    pitch_length: float,
+    frame_new_coverage: Sequence[float] | None = None,
+    additional_failures: Sequence[str] = (),
+    supporting_line_point_count: int = 0,
+    geometry_coverage: tuple[float, float, float] | None = None,
+    model_geometry_support: bool = False,
+) -> CalibrationQualityReport:
+    """Voeg een conservatieve, geometrisch onderbouwde beoordeling toe."""
+    if pitch_width <= 0.0 or pitch_length <= 0.0:
+        raise ValueError("Veldafmetingen moeten groter zijn dan nul.")
+
+    inliers = [point for point in report.point_errors if point.is_inlier]
+    pitch_points = np.asarray(
+        [point.expected_pitch_point for point in inliers],
+        dtype=np.float64,
+    )
+    inlier_ratio = report.inlier_count / max(report.point_count, 1)
+    width_coverage = _axis_coverage(pitch_points, 0, pitch_width)
+    length_coverage = _axis_coverage(pitch_points, 1, pitch_length)
+    hull_coverage = _hull_coverage(
+        pitch_points,
+        pitch_width * pitch_length,
+    )
+    if geometry_coverage is not None:
+        width_coverage = max(width_coverage, geometry_coverage[0])
+        length_coverage = max(length_coverage, geometry_coverage[1])
+        hull_coverage = max(hull_coverage, geometry_coverage[2])
+
+    failures: list[str] = [str(reason) for reason in additional_failures]
+    warnings: list[str] = []
+    rms_error = report.inlier_points.rms_error
+    frame_coverages = (
+        tuple(float(value) for value in frame_new_coverage)
+        if frame_new_coverage is not None
+        else None
+    )
+    selected_frame_count = (
+        len(frame_coverages) if frame_coverages is not None else None
+    )
+    non_redundant_frame_count = (
+        sum(value > 0.08 for value in frame_coverages)
+        if frame_coverages is not None
+        else None
+    )
+
+    if (
+        report.inlier_count <= 4
+        and supporting_line_point_count < 6
+        and not model_geometry_support
+    ):
+        failures.append(
+            "Vier of minder inliers geven geen onafhankelijke validatie."
+        )
+    if inlier_ratio < 0.60:
+        failures.append("Minder dan 60% van de controlepunten is inlier.")
+    if width_coverage < 0.75:
+        failures.append("Inliers bestrijken minder dan 75% van de veldbreedte.")
+    if length_coverage < 0.75:
+        failures.append("Inliers bestrijken minder dan 75% van de veldlengte.")
+    if hull_coverage < 0.35:
+        failures.append("Inliers bestrijken minder dan 35% van het veldvlak.")
+    if rms_error is None or rms_error > 15.0:
+        failures.append("De RMS-inlierfout ontbreekt of is groter dan 15 px.")
+    if (
+        non_redundant_frame_count is not None
+        and non_redundant_frame_count < 2
+    ):
+        failures.append("Minder dan twee frames voegen unieke beelddekking toe.")
+
+    if not failures:
+        if model_geometry_support and report.inlier_count <= 4:
+            warnings.append(
+                "Kalibratie is uitsluitend gebaseerd op vier doelpalen; "
+                "controleer de geprojecteerde zijlijnen extra zorgvuldig."
+            )
+        if report.inlier_count < 6:
+            warnings.append("Minder dan zes inliers beschikbaar.")
+        if inlier_ratio < 0.80:
+            warnings.append("Minder dan 80% van de controlepunten is inlier.")
+        if width_coverage < 0.90:
+            warnings.append("Inliers dekken minder dan 90% van de veldbreedte.")
+        if length_coverage < 0.90:
+            warnings.append("Inliers dekken minder dan 90% van de veldlengte.")
+        if hull_coverage < 0.60:
+            warnings.append("Inliers dekken minder dan 60% van het veldvlak.")
+        if rms_error is not None and rms_error > 6.0:
+            warnings.append("De RMS-inlierfout is groter dan 6 px.")
+        if (
+            non_redundant_frame_count is not None
+            and non_redundant_frame_count < 3
+        ):
+            warnings.append("Minder dan drie frames voegen unieke dekking toe.")
+
+    score = _confidence_score(
+        inlier_count=report.inlier_count,
+        inlier_ratio=inlier_ratio,
+        rms_error=rms_error,
+        width_coverage=width_coverage,
+        length_coverage=length_coverage,
+        hull_coverage=hull_coverage,
+    )
+    if failures:
+        score = min(score, 49.0)
+    elif warnings:
+        score = min(score, 79.0)
+    status = (
+        CalibrationStatus.FAIL
+        if failures
+        else CalibrationStatus.PASS
+        if not warnings and score >= 80.0
+        else CalibrationStatus.WARNING
+    )
+    assessment = QualityAssessment(
+        status=status,
+        confidence_score=score,
+        inlier_ratio=inlier_ratio,
+        width_coverage=width_coverage,
+        length_coverage=length_coverage,
+        hull_coverage=hull_coverage,
+        selected_frame_count=selected_frame_count,
+        non_redundant_frame_count=non_redundant_frame_count,
+        failures=tuple(failures),
+        warnings=tuple(warnings),
+    )
+    return replace(report, assessment=assessment)
 
 
 def _validate_points(points: np.ndarray, name: str) -> np.ndarray:
@@ -370,3 +633,47 @@ def _format_outlier(point_error: PointReprojectionError) -> str:
     if point_error.frame_number is not None:
         parts.append(f"videoframe {point_error.frame_number}")
     return " | ".join(parts) + f": {point_error.error_pixels:.1f} px"
+
+
+def _axis_coverage(
+    points: np.ndarray,
+    axis: int,
+    total_size: float,
+) -> float:
+    if len(points) < 2:
+        return 0.0
+    span = float(np.ptp(points[:, axis]))
+    return min(1.0, max(0.0, span / total_size))
+
+
+def _hull_coverage(points: np.ndarray, pitch_area: float) -> float:
+    if len(points) < 3:
+        return 0.0
+    hull = cv2.convexHull(points.astype(np.float32))
+    area = float(cv2.contourArea(hull))
+    return min(1.0, max(0.0, area / pitch_area))
+
+
+def _confidence_score(
+    inlier_count: int,
+    inlier_ratio: float,
+    rms_error: float | None,
+    width_coverage: float,
+    length_coverage: float,
+    hull_coverage: float,
+) -> float:
+    count_component = min(1.0, max(0.0, (inlier_count - 4) / 4.0))
+    error_component = (
+        0.0
+        if rms_error is None
+        else min(1.0, max(0.0, 1.0 - rms_error / 12.0))
+    )
+    score = (
+        20.0 * count_component
+        + 25.0 * min(1.0, max(0.0, inlier_ratio))
+        + 20.0 * error_component
+        + 15.0 * width_coverage
+        + 10.0 * length_coverage
+        + 10.0 * hull_coverage
+    )
+    return round(score, 1)

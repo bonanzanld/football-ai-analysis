@@ -113,6 +113,7 @@ class TrackManager:
 
         field_position = self._project_field_position(
             xyxy=xyxy,
+            frame_number=frame_number,
         )
 
         if tracker_id not in self.tracks:
@@ -177,6 +178,7 @@ class TrackManager:
     def _project_field_position(
         self,
         xyxy,
+        frame_number: int,
     ) -> FieldPosition | None:
         """
         Projecteer het voetpunt van de bounding box naar het veld.
@@ -192,6 +194,7 @@ class TrackManager:
             return (
                 self.field_projector.project_bounding_box(
                     bounding_box=xyxy,
+                    frame_number=frame_number,
                 )
             )
         except (

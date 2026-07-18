@@ -54,6 +54,7 @@ class PlayerFilter:
         self,
         frame: np.ndarray,
         detections: sv.Detections,
+        frame_number: int | None = None,
     ) -> sv.Detections:
         if len(detections) == 0:
             return detections
@@ -73,6 +74,7 @@ class PlayerFilter:
                 bounding_box=bounding_box,
                 frame_width=frame_width,
                 frame_height=frame_height,
+                frame_number=frame_number,
             )
 
         return detections[keep_mask]
@@ -83,6 +85,7 @@ class PlayerFilter:
         bounding_box: np.ndarray,
         frame_width: int,
         frame_height: int,
+        frame_number: int | None,
     ) -> bool:
         clipped_box = self._clip_box(
             bounding_box=bounding_box,
@@ -112,6 +115,7 @@ class PlayerFilter:
                 bounding_box=clipped_box,
                 frame_width=frame_width,
                 frame_height=frame_height,
+                frame_number=frame_number,
             )
         ):
             return False

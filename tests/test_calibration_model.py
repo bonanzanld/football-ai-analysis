@@ -7,8 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from football_ai.calibration.quality_report import calculate_quality_report
-from football_ai.pitch.calibration_model import PitchCalibration
+from football_ai.calibration.quality_report import (
+    assess_calibration_quality,
+    calculate_quality_report,
+)
+from football_ai.pitch.calibration_model import (
+    CalibrationKeyframe,
+    PitchCalibration,
+)
 from football_ai.pitch.field_model import create_half_pitch_profile
 
 
@@ -38,6 +44,60 @@ class PitchCalibrationJsonTests(unittest.TestCase):
             restored = PitchCalibration.load(path)
 
         self.assertIsNone(restored.quality)
+        with self.assertRaisesRegex(RuntimeError, "geen bruikbaarheidsbeoordeling"):
+            restored.require_usable()
+
+    def test_rejects_calibration_with_failed_assessment(self) -> None:
+        calibration = self._create_calibration(with_quality=True)
+        calibration.quality = assess_calibration_quality(
+            calibration.quality,
+            pitch_width=42.5,
+            pitch_length=64.0,
+        )
+
+        self.assertFalse(calibration.is_usable)
+        with self.assertRaisesRegex(RuntimeError, "status FAIL"):
+            calibration.require_usable()
+
+    def test_keyframes_round_trip_and_nearest_frame_selection(self) -> None:
+        calibration = self._create_calibration(with_quality=False)
+        first_matrix = np.eye(3)
+        second_matrix = np.array(
+            [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        calibration.keyframes = (
+            self._keyframe(100, first_matrix),
+            self._keyframe(300, second_matrix),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sequence.json"
+            calibration.save(path)
+            restored = PitchCalibration.load(path)
+
+        self.assertEqual(len(restored.keyframes), 2)
+        np.testing.assert_allclose(
+            restored.image_to_pitch_for_frame(260),
+            second_matrix,
+        )
+
+    @staticmethod
+    def _keyframe(
+        frame_number: int,
+        matrix: np.ndarray,
+    ) -> CalibrationKeyframe:
+        return CalibrationKeyframe(
+            frame_number=frame_number,
+            time_seconds=frame_number / 30.0,
+            image_to_pitch_matrix=matrix,
+            pitch_to_image_matrix=np.linalg.inv(matrix),
+            image_corners=np.array(
+                [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]
+            ),
+            point_count=4,
+            line_point_count=12,
+            line_rms_error_pixels=1.0,
+        )
 
     @staticmethod
     def _create_calibration(with_quality: bool) -> PitchCalibration:

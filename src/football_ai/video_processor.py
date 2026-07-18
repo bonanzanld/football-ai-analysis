@@ -154,6 +154,7 @@ class VideoProcessor:
                     self.player_filter.filter(
                         frame=frame,
                         detections=player_detections,
+                        frame_number=frame_number,
                     )
                 )
 

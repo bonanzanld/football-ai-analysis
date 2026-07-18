@@ -6,6 +6,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from football_ai.calibration.quality_report import (
+    CalibrationQualityReport,
+    calculate_quality_report,
+)
 from football_ai.pitch.panorama_builder import PanoramaBuilder
 
 from football_ai.pitch.calibration_model import PitchCalibration, PitchProfile
@@ -886,6 +890,7 @@ class MultiFramePitchCalibrator:
         self.selected_frames: list[SelectedFrame] = []
         self.observations: list[LandmarkObservation] = []
         self.frame_transforms: list[np.ndarray] = []
+        self.quality_report: CalibrationQualityReport | None = None
         self.landmarks = self._create_landmark_definitions()
 
     def calibrate_video(self, video_path: Path) -> PitchCalibration:
@@ -955,6 +960,12 @@ class MultiFramePitchCalibrator:
             )
 
         pitch_to_image = np.linalg.inv(image_to_pitch)
+        self.quality_report = calculate_quality_report(
+            image_points=image_array,
+            pitch_points=pitch_array,
+            image_to_pitch_matrix=image_to_pitch,
+            inlier_mask=mask,
+        )
         image_corners = cv2.perspectiveTransform(
             self.profile.world_corners.reshape(-1, 1, 2).astype(np.float32),
             pitch_to_image,

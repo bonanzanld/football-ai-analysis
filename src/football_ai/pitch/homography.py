@@ -3,9 +3,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from football_ai.pitch.pitch_model import (
-    PitchCalibration,
-)
+from football_ai.pitch.calibration_model import PitchCalibration
+from football_ai.pitch.field_model import PitchProfile
 
 
 class PitchHomography:

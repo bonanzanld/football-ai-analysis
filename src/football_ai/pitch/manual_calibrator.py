@@ -6,7 +6,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from football_ai.pitch.pitch_model import PitchCalibration, PitchProfile
+from football_ai.pitch.panorama_builder import PanoramaBuilder
+
+from football_ai.pitch.calibration_model import PitchCalibration, PitchProfile
 
 
 @dataclass(frozen=True)
@@ -883,6 +885,7 @@ class MultiFramePitchCalibrator:
         self.profile = profile
         self.selected_frames: list[SelectedFrame] = []
         self.observations: list[LandmarkObservation] = []
+        self.frame_transforms: list[np.ndarray] = []
         self.landmarks = self._create_landmark_definitions()
 
     def calibrate_video(self, video_path: Path) -> PitchCalibration:
@@ -894,8 +897,19 @@ class MultiFramePitchCalibrator:
             landmarks=self.landmarks,
         )
         self.selected_frames, self.observations = app.run()
-
+        print(">>> DEBUG: calibrate_video() gebruikt mijn nieuwe code <<<")
         transforms = self._calculate_frame_transforms()
+        self.frame_transforms = transforms
+
+        # Analyseer eerst de geometrie van alle frame-transformaties.
+        panorama_report = PanoramaBuilder(
+                selected_frames=self.selected_frames,
+                frame_transforms=transforms,
+        ).analyze()
+
+        print()
+        panorama_report.print_summary()
+        print()
 
         image_points: list[tuple[float, float]] = []
         pitch_points: list[tuple[float, float]] = []
@@ -971,21 +985,60 @@ class MultiFramePitchCalibrator:
         calibration: PitchCalibration,
         grid_interval_m: float = 5.0,
     ) -> np.ndarray:
+        """
+        Maak een panorama van alle geselecteerde kalibratieframes.
+
+        Alle frames worden naar het coördinatenstelsel van het eerste frame
+        gewarpt, samengevoegd op één groter canvas en daarna voorzien van:
+
+        - de volledige veldomtrek;
+        - een raster per `grid_interval_m`;
+        - een extra duidelijke middenlijn;
+        - beide doelen;
+        - alle handmatig aangeklikte landmarks;
+        - de door de uiteindelijke homografie voorspelde landmarkposities;
+        - pixelafwijkingen tussen klik en voorspelling.
+
+        Daardoor is direct zichtbaar of:
+        - de vier frames correct aan elkaar aansluiten;
+        - het hele veld logisch wordt gereconstrueerd;
+        - zijlijnen, achterlijnen, doelen en middenlijn overeenkomen;
+        - de opgegeven veldafmetingen geometrisch plausibel zijn.
+        """
         if not self.selected_frames:
             raise RuntimeError("Geen geselecteerde frames beschikbaar.")
 
-        preview = self.selected_frames[0].frame.copy()
+        if len(self.frame_transforms) != len(self.selected_frames):
+            self.frame_transforms = self._calculate_frame_transforms()
 
-        polygon = np.round(calibration.image_corners).astype(np.int32)
+        panorama, reference_to_canvas = self._build_panorama(
+            self.selected_frames,
+            self.frame_transforms,
+        )
+
+        pitch_to_canvas = (
+            reference_to_canvas
+            @ calibration.pitch_to_image_matrix
+        )
+        pitch_to_canvas /= pitch_to_canvas[2, 2]
+
+        # Volledige veldomtrek.
+        pitch_corners = cv2.perspectiveTransform(
+            self.profile.world_corners.reshape(-1, 1, 2).astype(np.float32),
+            pitch_to_canvas,
+        ).reshape(-1, 2)
+
+        polygon = np.round(pitch_corners).astype(np.int32)
         cv2.polylines(
-            preview,
+            panorama,
             [polygon],
             isClosed=True,
             color=(0, 255, 255),
-            thickness=3,
+            thickness=4,
             lineType=cv2.LINE_AA,
         )
 
+        # Raster over de veldbreedte.
         for x_value in np.arange(
             0.0,
             self.profile.width_m + 0.001,
@@ -993,12 +1046,15 @@ class MultiFramePitchCalibrator:
             dtype=np.float32,
         ):
             self._draw_pitch_line(
-                preview,
-                calibration.pitch_to_image_matrix,
+                panorama,
+                pitch_to_canvas,
                 (float(x_value), 0.0),
                 (float(x_value), self.profile.length_m),
+                color=(255, 180, 0),
+                thickness=1,
             )
 
+        # Raster over de veldlengte.
         for y_value in np.arange(
             0.0,
             self.profile.length_m + 0.001,
@@ -1006,24 +1062,387 @@ class MultiFramePitchCalibrator:
             dtype=np.float32,
         ):
             self._draw_pitch_line(
-                preview,
-                calibration.pitch_to_image_matrix,
+                panorama,
+                pitch_to_canvas,
                 (0.0, float(y_value)),
                 (self.profile.width_m, float(y_value)),
+                color=(255, 180, 0),
+                thickness=1,
             )
 
+        # Middenlijn altijd exact op halve veldlengte tekenen.
+        middle_y = self.profile.length_m / 2.0
+        self._draw_pitch_line(
+            panorama,
+            pitch_to_canvas,
+            (0.0, middle_y),
+            (self.profile.width_m, middle_y),
+            color=(0, 255, 255),
+            thickness=5,
+        )
+
         self._draw_goal_reference(
-            preview,
-            calibration.pitch_to_image_matrix,
+            panorama,
+            pitch_to_canvas,
             self.profile.goal_a_posts,
         )
         self._draw_goal_reference(
-            preview,
-            calibration.pitch_to_image_matrix,
+            panorama,
+            pitch_to_canvas,
             self.profile.goal_b_posts,
         )
 
-        return preview
+        errors: list[float] = []
+
+        for observation in self.observations:
+            if observation.frame_index >= len(self.frame_transforms):
+                continue
+
+            clicked_source = np.asarray(
+                [[observation.image_point]],
+                dtype=np.float32,
+            )
+
+            clicked_reference = cv2.perspectiveTransform(
+                clicked_source,
+                self.frame_transforms[observation.frame_index],
+            )[0, 0]
+
+            clicked_canvas = cv2.perspectiveTransform(
+                np.asarray([[clicked_reference]], dtype=np.float32),
+                reference_to_canvas,
+            )[0, 0]
+
+            landmark = self.landmarks[observation.landmark_key]
+            predicted_canvas = cv2.perspectiveTransform(
+                np.asarray(
+                    [[landmark.pitch_point]],
+                    dtype=np.float32,
+                ),
+                pitch_to_canvas,
+            )[0, 0]
+
+            if not (
+                np.all(np.isfinite(clicked_canvas))
+                and np.all(np.isfinite(predicted_canvas))
+            ):
+                continue
+
+            error_pixels = float(
+                np.linalg.norm(clicked_canvas - predicted_canvas)
+            )
+            errors.append(error_pixels)
+
+            clicked_point = tuple(np.round(clicked_canvas).astype(int))
+            predicted_point = tuple(np.round(predicted_canvas).astype(int))
+
+            error_color = (
+                (60, 210, 60)
+                if error_pixels <= 12.0
+                else (0, 0, 255)
+            )
+
+            cv2.line(
+                panorama,
+                clicked_point,
+                predicted_point,
+                error_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+            cv2.circle(
+                panorama,
+                clicked_point,
+                8,
+                (0, 255, 255),
+                -1,
+                cv2.LINE_AA,
+            )
+            cv2.circle(
+                panorama,
+                clicked_point,
+                11,
+                (20, 20, 20),
+                2,
+                cv2.LINE_AA,
+            )
+
+            self._draw_cross(
+                panorama,
+                predicted_point,
+                color=(255, 0, 255),
+                size=11,
+                thickness=3,
+            )
+
+            label = (
+                f"{observation.landmark_key} "
+                f"F{observation.frame_index + 1} "
+                f"{error_pixels:.1f}px"
+            )
+            cv2.putText(
+                panorama,
+                label,
+                (clicked_point[0] + 12, clicked_point[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                error_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+        self._draw_validation_legend(panorama, errors)
+        return panorama
+
+    @staticmethod
+    def _build_panorama(
+        selected_frames: list[SelectedFrame],
+        frame_transforms: list[np.ndarray],
+        padding: int = 80,
+        maximum_dimension: int = 10000,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Warp alle geselecteerde frames naar het referentiecoördinatenstelsel.
+
+        `frame_transforms[i]` zet frame i om naar frame 0. Op basis van de
+        getransformeerde beeldhoeken wordt een canvas gemaakt dat groot genoeg
+        is voor alle frames. Het resultaat bevat tevens de matrix die punten
+        uit het referentieframe naar het panoramocanvas verplaatst.
+        """
+        if len(selected_frames) != len(frame_transforms):
+            raise RuntimeError(
+                "Aantal frames en aantal frame-transformaties komen niet overeen."
+            )
+
+        all_corners: list[np.ndarray] = []
+
+        for selected, transform in zip(selected_frames, frame_transforms):
+            height, width = selected.frame.shape[:2]
+            corners = np.asarray(
+                [
+                    [0.0, 0.0],
+                    [float(width - 1), 0.0],
+                    [float(width - 1), float(height - 1)],
+                    [0.0, float(height - 1)],
+                ],
+                dtype=np.float32,
+            ).reshape(-1, 1, 2)
+
+            warped_corners = cv2.perspectiveTransform(
+                corners,
+                transform.astype(np.float64),
+            ).reshape(-1, 2)
+
+            if not np.all(np.isfinite(warped_corners)):
+                raise RuntimeError(
+                    "Een frame-transformatie leverde ongeldige panoramapunten op."
+                )
+
+            all_corners.append(warped_corners)
+
+        combined = np.vstack(all_corners)
+        minimum = np.floor(combined.min(axis=0)).astype(int)
+        maximum = np.ceil(combined.max(axis=0)).astype(int)
+
+        canvas_width = int(maximum[0] - minimum[0] + 1 + 2 * padding)
+        canvas_height = int(maximum[1] - minimum[1] + 1 + 2 * padding)
+
+        if canvas_width <= 0 or canvas_height <= 0:
+            raise RuntimeError("Ongeldige afmetingen voor het panoramocanvas.")
+
+        if (
+            canvas_width > maximum_dimension
+            or canvas_height > maximum_dimension
+        ):
+            raise RuntimeError(
+                "Het berekende panorama is onrealistisch groot. "
+                "Waarschijnlijk is een frame verkeerd geregistreerd."
+            )
+
+        translation = np.asarray(
+            [
+                [1.0, 0.0, float(-minimum[0] + padding)],
+                [0.0, 1.0, float(-minimum[1] + padding)],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+        accumulator = np.zeros(
+            (canvas_height, canvas_width, 3),
+            dtype=np.float32,
+        )
+        total_weight = np.zeros(
+            (canvas_height, canvas_width),
+            dtype=np.float32,
+        )
+
+        for selected, transform in zip(selected_frames, frame_transforms):
+            frame_to_canvas = translation @ transform
+            frame_to_canvas /= frame_to_canvas[2, 2]
+
+            warped_frame = cv2.warpPerspective(
+                selected.frame,
+                frame_to_canvas,
+                (canvas_width, canvas_height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0),
+            )
+
+            source_mask = np.full(
+                selected.frame.shape[:2],
+                255,
+                dtype=np.uint8,
+            )
+            warped_mask = cv2.warpPerspective(
+                source_mask,
+                frame_to_canvas,
+                (canvas_width, canvas_height),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+
+            valid = warped_mask > 0
+            if not np.any(valid):
+                continue
+
+            # Zachte overgangen in overlappende gebieden.
+            binary_mask = valid.astype(np.uint8)
+            distance = cv2.distanceTransform(
+                binary_mask,
+                cv2.DIST_L2,
+                3,
+            )
+            weight = np.where(
+                valid,
+                np.maximum(distance, 1.0),
+                0.0,
+            ).astype(np.float32)
+
+            accumulator += warped_frame.astype(np.float32) * weight[..., None]
+            total_weight += weight
+
+        if not np.any(total_weight > 0):
+            raise RuntimeError("De geselecteerde frames konden niet worden samengevoegd.")
+
+        panorama = np.zeros_like(accumulator, dtype=np.uint8)
+        valid_pixels = total_weight > 0
+        panorama[valid_pixels] = np.clip(
+            accumulator[valid_pixels]
+            / total_weight[valid_pixels, None],
+            0,
+            255,
+        ).astype(np.uint8)
+
+        return panorama, translation
+
+    @staticmethod
+    def _draw_cross(
+        image: np.ndarray,
+        point: tuple[int, int],
+        color: tuple[int, int, int],
+        size: int,
+        thickness: int,
+    ) -> None:
+        x, y = point
+        cv2.line(
+            image,
+            (x - size, y - size),
+            (x + size, y + size),
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+        cv2.line(
+            image,
+            (x - size, y + size),
+            (x + size, y - size),
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    @staticmethod
+    def _draw_validation_legend(
+        image: np.ndarray,
+        errors: list[float],
+    ) -> None:
+        panel_x = 18
+        panel_y = 18
+        panel_w = 500
+        panel_h = 142
+
+        overlay = image.copy()
+        cv2.rectangle(
+            overlay,
+            (panel_x, panel_y),
+            (panel_x + panel_w, panel_y + panel_h),
+            (20, 20, 20),
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.78, image, 0.22, 0.0, image)
+
+        cv2.putText(
+            image,
+            "KALIBRATIEPANORAMA",
+            (panel_x + 14, panel_y + 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "Geel = klik | magenta = voorspeld | cyaan = veldrand/middenlijn",
+            (panel_x + 14, panel_y + 57),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (225, 225, 225),
+            1,
+            cv2.LINE_AA,
+        )
+
+        if errors:
+            mean_error = float(np.mean(errors))
+            max_error = float(np.max(errors))
+            status = "GOED" if max_error <= 12.0 else "CONTROLEREN"
+            status_color = (
+                (60, 210, 60)
+                if status == "GOED"
+                else (0, 0, 255)
+            )
+            summary = (
+                f"Gemiddeld {mean_error:.1f}px | "
+                f"maximaal {max_error:.1f}px | {status}"
+            )
+        else:
+            status_color = (0, 165, 255)
+            summary = "Geen waarnemingen beschikbaar voor validatie."
+
+        cv2.putText(
+            image,
+            summary,
+            (panel_x + 14, panel_y + 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            status_color,
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "Controleer aansluiting frames, beide doelen, zijlijnen en middenlijn.",
+            (panel_x + 14, panel_y + 122),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44,
+            (225, 225, 225),
+            1,
+            cv2.LINE_AA,
+        )
 
     def _create_landmark_definitions(self) -> dict[int, LandmarkDefinition]:
         width = float(self.profile.width_m)
@@ -1106,6 +1525,22 @@ class MultiFramePitchCalibrator:
         source: np.ndarray,
         target: np.ndarray,
     ) -> np.ndarray:
+        """
+        Registreer het bronframe op het doelframe met ORB-kenmerken.
+
+        Voor de panorama-opbouw gebruiken we bewust een affine transformatie
+        in plaats van een volledige projectieve homografie. Een homografie kan
+        buiten het overlappende beeldgebied extreem vervormen en daardoor een
+        praktisch oneindig panoramocanvas veroorzaken.
+
+        De affine transformatie ondersteunt:
+
+        - translatie;
+        - rotatie;
+        - uniforme schaal.
+
+        Dit is voor een camerapan doorgaans stabieler dan een vrije homografie.
+        """
         source_gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
         target_gray = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
 
@@ -1139,11 +1574,13 @@ class MultiFramePitchCalibrator:
         )
 
         good_matches = []
+
         for pair in pairs:
             if len(pair) != 2:
                 continue
 
             best, second = pair
+
             if best.distance < 0.78 * second.distance:
                 good_matches.append(best)
 
@@ -1155,27 +1592,57 @@ class MultiFramePitchCalibrator:
                 source_keypoints[match.queryIdx].pt
                 for match in good_matches
             ]
-        ).reshape(-1, 1, 2)
+        )
 
         target_points = np.float32(
             [
                 target_keypoints[match.trainIdx].pt
                 for match in good_matches
             ]
-        ).reshape(-1, 1, 2)
+        )
 
-        transform, mask = cv2.findHomography(
+        affine, mask = cv2.estimateAffinePartial2D(
             source_points,
             target_points,
             method=cv2.RANSAC,
             ransacReprojThreshold=5.0,
+            maxIters=5000,
+            confidence=0.995,
+            refineIters=25,
         )
 
-        if transform is None or mask is None:
-            raise RuntimeError("ORB-homography mislukt.")
+        if affine is None or mask is None:
+            raise RuntimeError("ORB-affine registratie mislukt.")
 
-        if int(mask.sum()) < 10:
-            raise RuntimeError("ORB had te weinig inliers.")
+        inlier_count = int(mask.sum())
+
+        if inlier_count < 10:
+            raise RuntimeError(
+                f"ORB-affine registratie had te weinig inliers: "
+                f"{inlier_count}."
+            )
+
+        transform = np.vstack(
+            [
+                affine.astype(np.float64),
+                np.array(
+                    [0.0, 0.0, 1.0],
+                    dtype=np.float64,
+                ),
+            ]
+        )
+
+        if not np.all(np.isfinite(transform)):
+            raise RuntimeError(
+                "ORB-affine registratie leverde ongeldige waarden op."
+            )
+
+        determinant = float(np.linalg.det(transform[:2, :2]))
+
+        if abs(determinant) < 1e-8:
+            raise RuntimeError(
+                "ORB-affine registratie is singulier of bijna singulier."
+            )
 
         return transform
 
@@ -1263,6 +1730,8 @@ class MultiFramePitchCalibrator:
         matrix: np.ndarray,
         start: tuple[float, float],
         end: tuple[float, float],
+        color: tuple[int, int, int] = (255, 180, 0),
+        thickness: int = 1,
     ) -> None:
         pitch_points = np.asarray(
             [start, end],
@@ -1281,8 +1750,8 @@ class MultiFramePitchCalibrator:
             image,
             point_a,
             point_b,
-            (255, 180, 0),
-            1,
+            color,
+            thickness,
             cv2.LINE_AA,
         )
 

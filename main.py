@@ -10,6 +10,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from football_ai.detector import FootballDetector
+from football_ai.pitch.calibration_model import PitchCalibration
 from football_ai.video_processor import VideoProcessor
 
 
@@ -18,16 +19,43 @@ def main() -> None:
     print("⚽ Football AI")
     print("=" * 50)
 
-    video_path = Path(
-        "videos/brandevoortbrab.mov"
+    video_path = (
+        PROJECT_ROOT
+        / "videos"
+        / "brandevoortbrab.mov"
     )
 
-    output_path = Path(
-        "output/"
-        "brandevoortbrab_player_filter_test.mp4"
+    calibration_path = (
+        PROJECT_ROOT
+        / "output"
+        / "pitch"
+        / "brandevoortbrab_half_pitch.json"
+    )
+
+    output_path = (
+        PROJECT_ROOT
+        / "output"
+        / "brandevoortbrab_pitch_filter_test.mp4"
     )
 
     max_seconds = 20
+
+    if not video_path.exists():
+        raise FileNotFoundError(
+            f"Video niet gevonden: {video_path}"
+        )
+
+    if not calibration_path.exists():
+        raise FileNotFoundError(
+            "Kalibratiebestand niet gevonden.\n"
+            "Voer eerst uit:\n"
+            "python tools/calibrate_pitch.py\n\n"
+            f"Verwacht bestand:\n{calibration_path}"
+        )
+
+    calibration = PitchCalibration.load(
+        calibration_path
+    )
 
     detector = FootballDetector(
         player_threshold=0.20,
@@ -36,6 +64,7 @@ def main() -> None:
 
     processor = VideoProcessor(
         detector=detector,
+        pitch_calibration=calibration,
     )
 
     frames_processed = processor.process(
@@ -45,7 +74,7 @@ def main() -> None:
     )
 
     print()
-    print("✅ PlayerFilter-test gereed")
+    print("✅ PitchFilter-test gereed")
     print(
         f"✅ Frames verwerkt: "
         f"{frames_processed}"

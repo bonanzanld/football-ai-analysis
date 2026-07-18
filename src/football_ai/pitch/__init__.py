@@ -1,7 +1,7 @@
 from football_ai.pitch.homography import PitchHomography
 from football_ai.pitch.manual_calibrator import MultiFramePitchCalibrator
-from football_ai.pitch.pitch_model import (
-    PitchCalibration,
+from football_ai.pitch.calibration_model import PitchCalibration
+from football_ai.pitch.field_model import (
     PitchProfile,
     PitchType,
     create_full_pitch_profile,

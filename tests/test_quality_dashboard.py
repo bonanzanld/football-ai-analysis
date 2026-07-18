@@ -4,7 +4,10 @@ import unittest
 
 import numpy as np
 
-from football_ai.calibration.quality_report import calculate_quality_report
+from football_ai.calibration.quality_report import (
+    ControlPointContext,
+    calculate_quality_report,
+)
 from football_ai.pitch.manual_calibrator import MultiFramePitchCalibrator
 
 
@@ -16,6 +19,10 @@ class QualityDashboardTests(unittest.TestCase):
             pitch_points=np.zeros((2, 2)),
             image_to_pitch_matrix=np.eye(3),
             inlier_mask=np.array([1, 0]),
+            point_contexts=[
+                ControlPointContext(1, "Hoek linksachter", 0, 100),
+                ControlPointContext(4, "Hoek rechtsvoor", 2, 300),
+            ],
         )
 
         MultiFramePitchCalibrator._draw_quality_dashboard(image, report)
@@ -24,6 +31,12 @@ class QualityDashboardTests(unittest.TestCase):
         self.assertEqual(
             MultiFramePitchCalibrator._get_point_quality(report, 1),
             report.point_errors[1],
+        )
+        self.assertEqual(
+            MultiFramePitchCalibrator._format_dashboard_outlier(
+                report.point_errors[1]
+            ),
+            "Hoek rechtsvoor | F3 | 5.0 px",
         )
 
     def test_draws_fallback_for_legacy_calibration(self) -> None:

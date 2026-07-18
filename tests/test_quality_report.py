@@ -4,7 +4,10 @@ import unittest
 
 import numpy as np
 
-from football_ai.calibration.quality_report import calculate_quality_report
+from football_ai.calibration.quality_report import (
+    ControlPointContext,
+    calculate_quality_report,
+)
 
 
 class CalculateQualityReportTests(unittest.TestCase):
@@ -83,6 +86,29 @@ class CalculateQualityReportTests(unittest.TestCase):
         self.assertIn("RMS", output)
         self.assertIn("Maximum", output)
         self.assertIn("Punt 3: 20.0 px", output)
+
+    def test_preserves_point_context_in_json_and_terminal_report(self) -> None:
+        context = ControlPointContext(
+            landmark_key=4,
+            landmark_name="Hoek rechtsvoor",
+            frame_index=2,
+            frame_number=1234,
+        )
+        report = calculate_quality_report(
+            image_points=np.array([[20.0, 0.0]]),
+            pitch_points=np.array([[0.0, 0.0]]),
+            image_to_pitch_matrix=np.eye(3),
+            inlier_mask=np.array([0]),
+            point_contexts=[context],
+        )
+
+        restored = type(report).from_dict(report.to_dict())
+        output = restored.format_terminal_report()
+
+        self.assertEqual(restored.point_errors[0].landmark_key, 4)
+        self.assertIn("Hoek rechtsvoor", output)
+        self.assertIn("selectieframe 3", output)
+        self.assertIn("videoframe 1234", output)
 
     def test_terminal_report_handles_no_outliers(self) -> None:
         points = np.array([[1.0, 2.0]])

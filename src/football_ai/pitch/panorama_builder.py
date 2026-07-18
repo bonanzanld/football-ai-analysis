@@ -25,6 +25,25 @@ import cv2
 import numpy as np
 
 
+@dataclass(frozen=True, slots=True)
+class FrameRegistrationDiagnostics:
+    """Meetwaarden van de registratie tussen twee opeenvolgende frames."""
+
+    source_frame_index: int
+    target_frame_index: int
+    method: str
+    candidate_matches: int | None = None
+    inlier_count: int | None = None
+    median_error_pixels: float | None = None
+    correlation: float | None = None
+
+    @property
+    def inlier_ratio(self) -> float | None:
+        if self.candidate_matches in (None, 0) or self.inlier_count is None:
+            return None
+        return self.inlier_count / self.candidate_matches
+
+
 @dataclass(slots=True)
 class PanoramaFrameReport:
     """
@@ -51,6 +70,11 @@ class PanoramaFrameReport:
 
     projected_width: float = 0.0
     projected_height: float = 0.0
+
+    maximum_overlap_ratio: float = 0.0
+    new_coverage_ratio: float = 1.0
+    redundant: bool = False
+    registration: FrameRegistrationDiagnostics | None = None
 
     warnings: list[str] = field(default_factory=list)
 
@@ -166,6 +190,34 @@ class PanoramaReport:
                 f"  Perspectief     : "
                 f"{frame_report.perspective_strength:.6e}"
             )
+            print(
+                f"  Nieuwe dekking  : "
+                f"{frame_report.new_coverage_ratio:.1%}"
+            )
+            print(
+                f"  Max. overlap    : "
+                f"{frame_report.maximum_overlap_ratio:.1%}"
+            )
+
+            registration = frame_report.registration
+            if registration is not None:
+                print(f"  Registratie     : {registration.method}")
+                if registration.candidate_matches is not None:
+                    print(
+                        f"  Matches/inliers : "
+                        f"{registration.candidate_matches}/"
+                        f"{registration.inlier_count} "
+                        f"({_format_percentage(registration.inlier_ratio)})"
+                    )
+                if registration.median_error_pixels is not None:
+                    print(
+                        f"  Mediane fout    : "
+                        f"{registration.median_error_pixels:.2f} px"
+                    )
+                if registration.correlation is not None:
+                    print(
+                        f"  ECC-correlatie  : {registration.correlation:.4f}"
+                    )
 
             for warning in frame_report.warnings:
                 print(f"  - {warning}")
@@ -200,14 +252,19 @@ class PanoramaBuilder:
     MAXIMUM_CANVAS_DIMENSION = 10_000
 
     CANVAS_PADDING = 80
+    MAXIMUM_REDUNDANT_NEW_COVERAGE = 0.08
 
     def __init__(
         self,
         selected_frames: list[Any],
         frame_transforms: list[np.ndarray],
+        registration_diagnostics: (
+            list[FrameRegistrationDiagnostics] | None
+        ) = None,
     ) -> None:
         self.selected_frames = selected_frames
         self.frame_transforms = frame_transforms
+        self.registration_diagnostics = registration_diagnostics or []
 
     def analyze(self) -> PanoramaReport:
         """
@@ -234,11 +291,78 @@ class PanoramaBuilder:
                 transform=transform,
                 frame_index=frame_index,
             )
+            frame_report.registration = self._registration_for_frame(
+                frame_index
+            )
 
             report.add_frame_report(frame_report)
 
+        self._evaluate_frame_coverage(report)
         self._compute_canvas(report)
         return report
+
+    def _registration_for_frame(
+        self,
+        frame_index: int,
+    ) -> FrameRegistrationDiagnostics | None:
+        return next(
+            (
+                diagnostics
+                for diagnostics in self.registration_diagnostics
+                if diagnostics.source_frame_index == frame_index
+            ),
+            None,
+        )
+
+    def _evaluate_frame_coverage(self, report: PanoramaReport) -> None:
+        """Meet hoeveel een frame geometrisch toevoegt aan eerdere frames."""
+        for index, current in enumerate(report.frame_reports):
+            if index == 0 or not current.valid:
+                continue
+
+            overlap_ratios = [
+                self._bounding_box_overlap_ratio(current, previous)
+                for previous in report.frame_reports[:index]
+                if previous.valid
+            ]
+            current.maximum_overlap_ratio = max(overlap_ratios, default=0.0)
+            current.new_coverage_ratio = max(
+                0.0,
+                1.0 - current.maximum_overlap_ratio,
+            )
+            if (
+                current.new_coverage_ratio
+                <= self.MAXIMUM_REDUNDANT_NEW_COVERAGE
+            ):
+                current.redundant = True
+                warning = (
+                    f"Frame {current.frame_index + 1} voegt slechts "
+                    f"{current.new_coverage_ratio:.1%} nieuwe dekking toe "
+                    "en is waarschijnlijk redundant."
+                )
+                current.warnings.append(warning)
+                report.warnings.append(warning)
+
+    @staticmethod
+    def _bounding_box_overlap_ratio(
+        current: PanoramaFrameReport,
+        previous: PanoramaFrameReport,
+    ) -> float:
+        intersection_width = max(
+            0.0,
+            min(current.maximum_x, previous.maximum_x)
+            - max(current.minimum_x, previous.minimum_x),
+        )
+        intersection_height = max(
+            0.0,
+            min(current.maximum_y, previous.maximum_y)
+            - max(current.minimum_y, previous.minimum_y),
+        )
+        current_area = current.projected_width * current.projected_height
+        if current_area <= 0.0:
+            return 0.0
+        intersection_area = intersection_width * intersection_height
+        return min(1.0, intersection_area / current_area)
 
     def _validate_input(self) -> None:
         """
@@ -626,3 +750,7 @@ class PanoramaBuilder:
             report.warnings.append(
                 "De berekende canvasafmetingen zijn ongeldig."
             )
+
+
+def _format_percentage(value: float | None) -> str:
+    return "n.v.t." if value is None else f"{value:.1%}"

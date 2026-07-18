@@ -8,11 +8,15 @@ import numpy as np
 
 from football_ai.calibration.quality_report import (
     CalibrationQualityReport,
+    ControlPointContext,
     ErrorStatistics,
     PointReprojectionError,
     calculate_quality_report,
 )
-from football_ai.pitch.panorama_builder import PanoramaBuilder
+from football_ai.pitch.panorama_builder import (
+    FrameRegistrationDiagnostics,
+    PanoramaBuilder,
+)
 
 from football_ai.pitch.calibration_model import PitchCalibration, PitchProfile
 
@@ -892,6 +896,9 @@ class MultiFramePitchCalibrator:
         self.selected_frames: list[SelectedFrame] = []
         self.observations: list[LandmarkObservation] = []
         self.frame_transforms: list[np.ndarray] = []
+        self.frame_registration_diagnostics: list[
+            FrameRegistrationDiagnostics
+        ] = []
         self.quality_report: CalibrationQualityReport | None = None
         self.landmarks = self._create_landmark_definitions()
 
@@ -911,6 +918,7 @@ class MultiFramePitchCalibrator:
         panorama_report = PanoramaBuilder(
                 selected_frames=self.selected_frames,
                 frame_transforms=transforms,
+                registration_diagnostics=self.frame_registration_diagnostics,
         ).analyze()
 
         print()
@@ -919,6 +927,7 @@ class MultiFramePitchCalibrator:
 
         image_points: list[tuple[float, float]] = []
         pitch_points: list[tuple[float, float]] = []
+        point_contexts: list[ControlPointContext] = []
 
         for observation in self.observations:
             source_point = np.array(
@@ -936,8 +945,16 @@ class MultiFramePitchCalibrator:
                     float(transformed_point[1]),
                 )
             )
-            pitch_points.append(
-                self.landmarks[observation.landmark_key].pitch_point
+            landmark = self.landmarks[observation.landmark_key]
+            pitch_points.append(landmark.pitch_point)
+            selected_frame = self.selected_frames[observation.frame_index]
+            point_contexts.append(
+                ControlPointContext(
+                    landmark_key=landmark.key,
+                    landmark_name=landmark.name,
+                    frame_index=observation.frame_index,
+                    frame_number=selected_frame.frame_number,
+                )
             )
 
         image_array = np.asarray(image_points, dtype=np.float32)
@@ -966,6 +983,7 @@ class MultiFramePitchCalibrator:
             pitch_points=pitch_array,
             image_to_pitch_matrix=image_to_pitch,
             inlier_mask=mask,
+            point_contexts=point_contexts,
         )
         image_corners = cv2.perspectiveTransform(
             self.profile.world_corners.reshape(-1, 1, 2).astype(np.float32),
@@ -1387,7 +1405,7 @@ class MultiFramePitchCalibrator:
         panel_x = 18
         panel_y = 18
         panel_w = min(700, max(300, image.shape[1] - 36))
-        panel_h = min(300, max(180, image.shape[0] - 36))
+        panel_h = min(360, max(180, image.shape[0] - 36))
 
         overlay = image.copy()
         cv2.rectangle(
@@ -1465,14 +1483,73 @@ class MultiFramePitchCalibrator:
             y + 190,
             column_x,
         )
+
+        outliers = [
+            point_error
+            for point_error in quality.point_errors
+            if not point_error.is_inlier
+        ]
+        MultiFramePitchCalibrator._dashboard_text(
+            image,
+            "Outlierdetails",
+            (x, y + 230),
+            0.44,
+            (190, 190, 190),
+            1,
+        )
+        if not outliers:
+            MultiFramePitchCalibrator._dashboard_text(
+                image,
+                "Geen outliers gedetecteerd.",
+                (x + 130, y + 230),
+                0.44,
+                (60, 210, 60),
+                1,
+            )
+        else:
+            for row_index, point_error in enumerate(outliers[:2]):
+                MultiFramePitchCalibrator._dashboard_text(
+                    image,
+                    MultiFramePitchCalibrator._format_dashboard_outlier(
+                        point_error
+                    ),
+                    (x + 130, y + 230 + row_index * 28),
+                    0.42,
+                    (80, 80, 255),
+                    1,
+                )
+            if len(outliers) > 2:
+                MultiFramePitchCalibrator._dashboard_text(
+                    image,
+                    f"+ {len(outliers) - 2} overige outlier(s)",
+                    (x + 130, y + 286),
+                    0.40,
+                    (80, 80, 255),
+                    1,
+                )
+
         MultiFramePitchCalibrator._dashboard_text(
             image,
             "Fouten in pixels; kwaliteitsstatus volgt in Sprint 2.5.",
-            (x, y + 235),
+            (x, y + 320),
             0.43,
             (190, 190, 190),
             1,
         )
+
+    @staticmethod
+    def _format_dashboard_outlier(
+        point_error: PointReprojectionError,
+    ) -> str:
+        landmark = point_error.landmark_name or (
+            f"Punt {point_error.point_index + 1}"
+        )
+        frame = (
+            f"F{point_error.frame_index + 1}"
+            if point_error.frame_index is not None
+            else "frame onbekend"
+        )
+        return f"{landmark} | {frame} | {point_error.error_pixels:.1f} px"
 
     @staticmethod
     def _draw_dashboard_statistics_row(
@@ -1566,6 +1643,7 @@ class MultiFramePitchCalibrator:
         transforms: list[np.ndarray] = [
             np.eye(3, dtype=np.float64)
         ]
+        self.frame_registration_diagnostics = []
 
         for frame_index in range(1, len(self.selected_frames)):
             previous_frame = self.selected_frames[
@@ -1575,10 +1653,13 @@ class MultiFramePitchCalibrator:
                 frame_index
             ].frame
 
-            current_to_previous = self._estimate_image_transform(
+            current_to_previous, diagnostics = self._estimate_image_transform(
                 source=current_frame,
                 target=previous_frame,
+                source_frame_index=frame_index,
+                target_frame_index=frame_index - 1,
             )
+            self.frame_registration_diagnostics.append(diagnostics)
 
             current_to_reference = (
                 transforms[frame_index - 1]
@@ -1597,17 +1678,31 @@ class MultiFramePitchCalibrator:
         self,
         source: np.ndarray,
         target: np.ndarray,
-    ) -> np.ndarray:
+        source_frame_index: int,
+        target_frame_index: int,
+    ) -> tuple[np.ndarray, FrameRegistrationDiagnostics]:
         try:
-            return self._estimate_orb_transform(source, target)
+            return self._estimate_orb_transform(
+                source,
+                target,
+                source_frame_index,
+                target_frame_index,
+            )
         except RuntimeError:
-            return self._estimate_ecc_transform(source, target)
+            return self._estimate_ecc_transform(
+                source,
+                target,
+                source_frame_index,
+                target_frame_index,
+            )
 
     @staticmethod
     def _estimate_orb_transform(
         source: np.ndarray,
         target: np.ndarray,
-    ) -> np.ndarray:
+        source_frame_index: int,
+        target_frame_index: int,
+    ) -> tuple[np.ndarray, FrameRegistrationDiagnostics]:
         """
         Registreer het bronframe op het doelframe met ORB-kenmerken.
 
@@ -1727,13 +1822,30 @@ class MultiFramePitchCalibrator:
                 "ORB-affine registratie is singulier of bijna singulier."
             )
 
-        return transform
+        inlier_mask = mask.reshape(-1).astype(bool)
+        predicted = cv2.transform(
+            source_points.reshape(-1, 1, 2),
+            affine,
+        ).reshape(-1, 2)
+        errors = np.linalg.norm(predicted - target_points, axis=1)
+        median_error = float(np.median(errors[inlier_mask]))
+
+        return transform, FrameRegistrationDiagnostics(
+            source_frame_index=source_frame_index,
+            target_frame_index=target_frame_index,
+            method="ORB affine",
+            candidate_matches=len(good_matches),
+            inlier_count=inlier_count,
+            median_error_pixels=median_error,
+        )
 
     @staticmethod
     def _estimate_ecc_transform(
         source: np.ndarray,
         target: np.ndarray,
-    ) -> np.ndarray:
+        source_frame_index: int,
+        target_frame_index: int,
+    ) -> tuple[np.ndarray, FrameRegistrationDiagnostics]:
         source_gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
         target_gray = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
 
@@ -1805,7 +1917,12 @@ class MultiFramePitchCalibrator:
                 @ scale_matrix
             )
 
-        return affine.astype(np.float64)
+        return affine.astype(np.float64), FrameRegistrationDiagnostics(
+            source_frame_index=source_frame_index,
+            target_frame_index=target_frame_index,
+            method="ECC affine fallback",
+            correlation=float(correlation),
+        )
 
     @staticmethod
     def _draw_pitch_line(

@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
+
+
+@dataclass(frozen=True)
+class ControlPointContext:
+    """Herleidbare broninformatie van een kalibratiepunt."""
+
+    landmark_key: int
+    landmark_name: str
+    frame_index: int
+    frame_number: int
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,10 @@ class PointReprojectionError:
     reprojected_image_point: tuple[float, float]
     error_pixels: float
     is_inlier: bool
+    landmark_key: int | None = None
+    landmark_name: str | None = None
+    frame_index: int | None = None
+    frame_number: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +70,10 @@ class PointReprojectionError:
             "reprojected_image_point": list(self.reprojected_image_point),
             "error_pixels": self.error_pixels,
             "is_inlier": self.is_inlier,
+            "landmark_key": self.landmark_key,
+            "landmark_name": self.landmark_name,
+            "frame_index": self.frame_index,
+            "frame_number": self.frame_number,
         }
 
     @classmethod
@@ -76,6 +94,10 @@ class PointReprojectionError:
             ),
             error_pixels=float(data["error_pixels"]),
             is_inlier=bool(data["is_inlier"]),
+            landmark_key=_optional_int(data.get("landmark_key")),
+            landmark_name=data.get("landmark_name"),
+            frame_index=_optional_int(data.get("frame_index")),
+            frame_number=_optional_int(data.get("frame_number")),
         )
 
 
@@ -134,10 +156,7 @@ class CalibrationQualityReport:
             lines.append("Geen outliers gedetecteerd.")
         else:
             lines.extend(
-                (
-                    f"Punt {point_error.point_index + 1}: "
-                    f"{point_error.error_pixels:.1f} px"
-                )
+                _format_outlier(point_error)
                 for point_error in outliers
             )
 
@@ -174,6 +193,7 @@ def calculate_quality_report(
     pitch_points: np.ndarray,
     image_to_pitch_matrix: np.ndarray,
     inlier_mask: np.ndarray | None = None,
+    point_contexts: Sequence[ControlPointContext] | None = None,
 ) -> CalibrationQualityReport:
     """
     Bereken pixel-reprojectiefouten voor een veldkalibratie.
@@ -197,6 +217,7 @@ def calculate_quality_report(
 
     matrix = _validate_homography(image_to_pitch_matrix)
     inliers = _normalise_inlier_mask(inlier_mask, len(observed))
+    contexts = _normalise_point_contexts(point_contexts, len(observed))
 
     try:
         pitch_to_image = np.linalg.inv(matrix)
@@ -220,6 +241,18 @@ def calculate_quality_report(
             reprojected_image_point=_as_point(reprojected[index]),
             error_pixels=float(errors[index]),
             is_inlier=bool(inliers[index]),
+            landmark_key=(
+                contexts[index].landmark_key if contexts is not None else None
+            ),
+            landmark_name=(
+                contexts[index].landmark_name if contexts is not None else None
+            ),
+            frame_index=(
+                contexts[index].frame_index if contexts is not None else None
+            ),
+            frame_number=(
+                contexts[index].frame_number if contexts is not None else None
+            ),
         )
         for index in range(len(observed))
     )
@@ -301,5 +334,39 @@ def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
 def _format_pixels(value: float | None) -> str:
     return "n.v.t." if value is None else f"{value:.1f} px"
+
+
+def _normalise_point_contexts(
+    contexts: Sequence[ControlPointContext] | None,
+    point_count: int,
+) -> tuple[ControlPointContext, ...] | None:
+    if contexts is None:
+        return None
+    converted = tuple(contexts)
+    if len(converted) != point_count:
+        raise ValueError(
+            "point_contexts moet exact een context per controlepunt bevatten."
+        )
+    if not all(
+        isinstance(context, ControlPointContext)
+        for context in converted
+    ):
+        raise ValueError("point_contexts bevat een ongeldige context.")
+    return converted
+
+
+def _format_outlier(point_error: PointReprojectionError) -> str:
+    parts = [f"Punt {point_error.point_index + 1}"]
+    if point_error.landmark_name:
+        parts.append(point_error.landmark_name)
+    if point_error.frame_index is not None:
+        parts.append(f"selectieframe {point_error.frame_index + 1}")
+    if point_error.frame_number is not None:
+        parts.append(f"videoframe {point_error.frame_number}")
+    return " | ".join(parts) + f": {point_error.error_pixels:.1f} px"

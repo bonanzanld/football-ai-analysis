@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import argparse
 
 import cv2
 
@@ -14,10 +15,16 @@ from football_ai.calibration.bootstrap import PitchBootstrapAnalyzer
 
 
 def main() -> None:
-    video_path = PROJECT_ROOT / "videos" / "brandevoortbrab.mov"
+    parser = argparse.ArgumentParser(description="Ontdek representatieve camerastanden.")
+    parser.add_argument("--video", default="brandevoortbrab.mov", help="Bestandsnaam in de videos-map.")
+    args = parser.parse_args()
+    video_path = PROJECT_ROOT / "videos" / args.video
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video niet gevonden: {video_path}")
+    stem = video_path.stem
     output_dir = PROJECT_ROOT / "output" / "pitch_bootstrap"
-    report_path = output_dir / "brandevoortbrab_bootstrap.json"
-    preview_path = output_dir / "brandevoortbrab_camera_states.jpg"
+    report_path = output_dir / f"{stem}_bootstrap.json"
+    preview_path = output_dir / f"{stem}_camera_states.jpg"
 
     print("=" * 66)
     print("Football AI - Pitch Bootstrap Sprint 4.1")

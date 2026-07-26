@@ -11,6 +11,8 @@ from football_ai.calibration.quality_report import (
 )
 
 __all__ = [
+    "CameraMotionKeyframe",
+    "CameraMotionTrajectory",
     "CalibrationQualityReport",
     "CalibrationStatus",
     "ControlPointContext",
@@ -21,3 +23,7 @@ __all__ = [
     "calculate_quality_report",
     "calculate_quality_from_predictions",
 ]
+from football_ai.calibration.camera_motion import (
+    CameraMotionKeyframe,
+    CameraMotionTrajectory,
+)

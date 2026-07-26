@@ -4,8 +4,13 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
+from football_ai.calibration.camera_motion import CameraMotionTrajectory
+from football_ai.calibration.geometry_validation import (
+    validate_projected_pitch_geometry,
+)
 from football_ai.calibration.quality_report import CalibrationQualityReport
 
 from .field_model import PitchProfile
@@ -105,6 +110,7 @@ class PitchCalibration:
     frame_height: int
     quality: CalibrationQualityReport | None = None
     keyframes: tuple[CalibrationKeyframe, ...] = ()
+    camera_motion: CameraMotionTrajectory | None = None
 
     def __post_init__(self) -> None:
         self.image_corners = np.asarray(
@@ -162,6 +168,8 @@ class PitchCalibration:
             data["keyframes"] = [
                 keyframe.to_dict() for keyframe in self.keyframes
             ]
+        if self.camera_motion is not None:
+            data["camera_motion"] = self.camera_motion.to_dict()
         return data
 
     def save(self, path: Path) -> None:
@@ -208,6 +216,24 @@ class PitchCalibration:
             )
 
     def image_to_pitch_for_frame(self, frame_number: int) -> np.ndarray:
+        if self.camera_motion is not None:
+            matrix = self.camera_motion.image_to_pitch_for_frame(frame_number)
+            try:
+                pitch_to_image = np.linalg.inv(matrix)
+            except np.linalg.LinAlgError:
+                return self.camera_motion.nearest_image_to_pitch(frame_number)
+            projected_corners = cv2.perspectiveTransform(
+                self.profile.world_corners.astype(np.float64).reshape(-1, 1, 2),
+                pitch_to_image,
+            ).reshape(-1, 2)
+            validation = validate_projected_pitch_geometry(
+                projected_corners,
+                frame_width=self.frame_width,
+                frame_height=self.frame_height,
+            )
+            if not validation.valid:
+                return self.camera_motion.nearest_image_to_pitch(frame_number)
+            return matrix
         if not self.keyframes:
             return self.image_to_pitch_matrix
         return min(
@@ -268,5 +294,10 @@ class PitchCalibration:
             keyframes=tuple(
                 CalibrationKeyframe.from_dict(item)
                 for item in data.get("keyframes", [])
+            ),
+            camera_motion=(
+                CameraMotionTrajectory.from_dict(data["camera_motion"])
+                if data.get("camera_motion") is not None
+                else None
             ),
         )

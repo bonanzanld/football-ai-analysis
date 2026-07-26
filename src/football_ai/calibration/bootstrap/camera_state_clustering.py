@@ -17,6 +17,7 @@ class CameraStateCluster:
     maximum_distance: float
     support_ratio: float
     stable: bool
+    view_position: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,7 @@ def cluster_camera_states(
     unique_count = len(np.unique(np.round(features, decimals=6), axis=0))
     cluster_count = min(max(1, requested_cluster_count), len(samples), unique_count)
     labels, centers = _deterministic_kmeans(features, cluster_count)
+    view_positions = _view_positions(centers)
     clusters: list[CameraStateCluster] = []
     for cluster_id in range(cluster_count):
         indices = np.flatnonzero(labels == cluster_id)
@@ -52,6 +54,7 @@ def cluster_camera_states(
                 maximum_distance=float(np.max(distances)),
                 support_ratio=len(indices) / len(samples),
                 stable=(len(indices) / len(samples)) >= 0.05,
+                view_position=float(view_positions[cluster_id]),
             )
         )
     own_distances = np.linalg.norm(features - centers[labels], axis=1)
@@ -125,3 +128,15 @@ def _deterministic_kmeans(
             if len(members):
                 center_array[cluster_id] = np.mean(members, axis=0)
     return labels, center_array
+
+
+def _view_positions(centers: np.ndarray) -> np.ndarray:
+    if len(centers) == 1:
+        return np.asarray([0.5], dtype=np.float64)
+    centered = centers - np.mean(centers, axis=0)
+    _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+    coordinates = centered @ vh[0]
+    minimum, maximum = float(np.min(coordinates)), float(np.max(coordinates))
+    if maximum - minimum < 1e-9:
+        return np.full(len(centers), 0.5, dtype=np.float64)
+    return (coordinates - minimum) / (maximum - minimum)

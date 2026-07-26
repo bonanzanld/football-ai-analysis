@@ -6,6 +6,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from football_ai.calibration.automatic_field_lines import (
+    detect_goal_end_field_lines,
+)
 from football_ai.calibration.quality_report import (
     CalibrationQualityReport,
     ControlPointContext,
@@ -13,6 +16,10 @@ from football_ai.calibration.quality_report import (
     PointReprojectionError,
     assess_calibration_quality,
     calculate_quality_from_predictions,
+)
+from football_ai.calibration.camera_motion import (
+    CameraMotionKeyframe,
+    CameraMotionTrajectory,
 )
 from football_ai.calibration.geometry_validation import (
     validate_projected_pitch_geometry,
@@ -162,8 +169,8 @@ class OpenCvCalibrationApp:
         self.cancelled = False
         self.finished = False
         self.status_message = (
-            "Kies minimaal 3 overlappende frames: linker doel, tussenbeeld, "
-            "rechter doel."
+            "Kies eerst een scherp beeld van de linker doelzijde en daarna "
+            "een scherp beeld van de rechter doelzijde."
         )
 
     def run(
@@ -229,10 +236,9 @@ class OpenCvCalibrationApp:
         elif key in (8, 127):
             self._remove_last_frame()
         elif key in (10, 13):
-            if len(self.selected_frames) < 3:
+            if len(self.selected_frames) < 2:
                 self.status_message = (
-                    "Selecteer minimaal 3 frames: linker doel, een overlappend "
-                    "tussenbeeld en rechter doel."
+                    "Selecteer twee doelbeelden: eerst links, daarna rechts."
                 )
                 return
             self.mode = "annotate"
@@ -240,7 +246,8 @@ class OpenCvCalibrationApp:
             self.current_landmark_key = None
             self.current_frame = self.selected_frames[0].frame.copy()
             self.status_message = (
-                "Kies A voor het LINKER doel of B voor het RECHTER doel."
+                "Kalibreer dit beeld zelfstandig: exacte punten met 1-8, "
+                "doelen met A/B en witte lijnen met M."
             )
 
     def _handle_annotate_key(self, key: int) -> None:
@@ -260,16 +267,23 @@ class OpenCvCalibrationApp:
             self._start_goal_first_workflow("B")
             return
         if key in (ord("m"), ord("M")):
+            self.annotation_kind = (
+                "point" if self.annotation_kind == "line" else "line"
+            )
+            self.guided_steps = []
             self.status_message = (
-                "Doelpaalmodus gebruikt alleen vier grondpunten. "
-                "Lijninvoer is niet nodig."
+                "PUNTMODUS: kies een exact punt met toets 1-8."
+                if self.annotation_kind == "point"
+                else "LIJNMODUS: kies lijn 1-5 en klik minimaal 3 "
+                "goed verspreide plekken op dezelfde witte lijn."
             )
             return
 
         if self.annotation_kind == "point" and ord("1") <= key <= ord("8"):
+            self.current_landmark_key = int(chr(key))
+            self.guided_steps = []
             self.status_message = (
-                "Doelpaalmodus: gebruik A voor het LINKER doel of B voor "
-                "het RECHTER doel; vrije hoekpunten zijn uitgeschakeld."
+                "EXACT PUNT: " + self.landmarks[self.current_landmark_key].name
             )
             return
 
@@ -355,9 +369,10 @@ class OpenCvCalibrationApp:
                 self._advance_guided_step("line", self.current_line_key)
             return
 
-        if self.current_landmark_key not in (5, 6, 7, 8):
+        if self.current_landmark_key not in self.landmarks:
             self.status_message = (
-                "Kies eerst A voor het LINKER doel of B voor het RECHTER doel."
+                "Kies eerst een exact herkenningspunt met toets 1-8, "
+                "of schakel met M naar lijnmodus."
             )
             return
 
@@ -424,22 +439,25 @@ class OpenCvCalibrationApp:
     def _start_goal_first_workflow(self, goal: str) -> None:
         if goal == "A":
             self.guided_steps = [
+                ("point", 1),
                 ("point", 5),
                 ("point", 6),
+                ("point", 3),
             ]
             goal_description = "LINKER doel in de veldkaart/panorama"
         else:
             self.guided_steps = [
+                ("point", 2),
                 ("point", 8),
                 ("point", 7),
+                ("point", 4),
             ]
             goal_description = "RECHTER doel in de veldkaart/panorama"
         self.guided_step_index = 0
         self._activate_guided_step()
         self.status_message = (
-            f"DOEL {goal}: {goal_description}. Begin met de paal aan de "
-            "VERRE zijlijn. Klik exact waar de paal de grond en witte "
-            "doellijn raakt."
+            f"DOEL {goal}: {goal_description}. Begin met de VERRE veldhoek "
+            "waar achterlijn en zijlijn elkaar raken."
         )
 
     def _advance_guided_step(self, kind: str, key: int) -> bool:
@@ -451,13 +469,56 @@ class OpenCvCalibrationApp:
         self.guided_step_index += 1
         if self.guided_step_index >= len(self.guided_steps):
             self.guided_steps = []
-            self.status_message = (
-                "Doel-eerst workflow voor dit frame voltooid. Druk N voor "
-                "het volgende frame of Enter om te controleren."
-            )
+            self._detect_lines_for_completed_goal(key)
             return True
         self._activate_guided_step()
         return True
+
+    def _detect_lines_for_completed_goal(self, completed_key: int) -> None:
+        is_goal_a = completed_key == 3
+        corner_keys = (1, 3) if is_goal_a else (2, 4)
+        goal_line_key = 1 if is_goal_a else 2
+        points = {
+            item.landmark_key: item.image_point
+            for item in self.observations
+            if item.frame_index == self.annotation_frame_index
+        }
+        if not set(corner_keys) <= points.keys() or self.current_frame is None:
+            self.status_message = "Beide veldhoeken zijn nog niet geplaatst."
+            return
+        try:
+            detected = detect_goal_end_field_lines(
+                self.current_frame,
+                points[corner_keys[0]],
+                points[corner_keys[1]],
+                goal_line_key,
+            )
+        except ValueError as error:
+            self.status_message = str(error)
+            return
+        replaced_keys = {item.line_key for item in detected}
+        self.line_observations = [
+            item for item in self.line_observations
+            if not (
+                item.frame_index == self.annotation_frame_index
+                and item.line_key in replaced_keys
+            )
+        ]
+        for line in detected:
+            self.line_observations.extend(
+                FrameLineObservation(
+                    self.annotation_frame_index,
+                    line.line_key,
+                    point,
+                )
+                for point in line.points
+            )
+        minimum_confidence = min(item.confidence for item in detected)
+        self.status_message = (
+            "Doelzijde compleet. Achterlijn en zijlijnen automatisch "
+            f"gevonden (zekerheid {minimum_confidence:.0%}). Druk N voor "
+            "het volgende doelbeeld of Enter om te controleren."
+        )
 
     def _activate_guided_step(self) -> None:
         kind, key = self.guided_steps[self.guided_step_index]
@@ -474,6 +535,12 @@ class OpenCvCalibrationApp:
 
     @staticmethod
     def _guided_point_instruction(key: int) -> str:
+        if key in (1, 2):
+            goal = "A (LINKER doelzijde)" if key == 1 else "B (RECHTER doelzijde)"
+            return f"DOEL {goal}: klik de VERRE veldhoek op de achterlijn."
+        if key in (3, 4):
+            goal = "A (LINKER doelzijde)" if key == 3 else "B (RECHTER doelzijde)"
+            return f"DOEL {goal}: klik de NABIJ veldhoek op de achterlijn."
         goal = "A (LINKER doel)" if key in (5, 6) else "B (RECHTER doel)"
         side = (
             "VERRE paal, richting de bovenste/verste zijlijn"
@@ -543,7 +610,8 @@ class OpenCvCalibrationApp:
         self.annotation_kind = "point"
         self._reset_zoom()
         self.status_message = (
-            "Kies A voor het LINKER doel of B voor het RECHTER doel."
+            "Kalibreer dit beeld zelfstandig: 1-8 voor exacte punten, "
+            "A/B voor doelen of M voor witte lijnen."
         )
 
     def _previous_annotation_frame(self) -> None:
@@ -559,7 +627,8 @@ class OpenCvCalibrationApp:
         self.annotation_kind = "point"
         self._reset_zoom()
         self.status_message = (
-            "Kies A voor het LINKER doel of B voor het RECHTER doel."
+            "Kalibreer dit beeld zelfstandig: 1-8 voor exacte punten, "
+            "A/B voor doelen of M voor witte lijnen."
         )
 
     def _undo_last_observation(self) -> None:
@@ -610,47 +679,74 @@ class OpenCvCalibrationApp:
         self,
     ) -> tuple[list[int], list[str]]:
         errors: list[str] = []
-        goalpost_observations = [
-            item for item in self.observations
-            if item.landmark_key in (5, 6, 7, 8)
-        ]
-        contributing_frames = sorted(
-            {
-                item.frame_index
-                for item in goalpost_observations
-            }
-        )
+        valid_frames: list[int] = []
         for frame_index in range(len(self.selected_frames)):
-            for line_key in self.field_lines:
-                count = sum(
-                    item.frame_index == frame_index
-                    and item.line_key == line_key
-                    for item in self.line_observations
-                )
-                if 0 < count < 3:
-                    errors.append(
-                        f"Frame {frame_index + 1}: "
-                        f"{self.field_lines[line_key].name} heeft {count} "
-                        "klik(ken); maak er minimaal 3 van."
-                    )
-
-        marked_goalposts = {
-            item.landmark_key for item in goalpost_observations
-        }
-        missing_goalposts = [
-            self.landmarks[key].name
-            for key in (5, 6, 8, 7)
-            if key not in marked_goalposts
-        ]
-        if missing_goalposts:
-            errors.append("Nog nodig: " + ", ".join(missing_goalposts) + ".")
-
-        if len(contributing_frames) < 2:
-            errors.append(
-                "Gebruik minimaal twee verschillende videoframes: één rond "
-                "Doel A en één rond Doel B."
+            frame_points = [
+                item for item in self.observations
+                if item.frame_index == frame_index
+            ]
+            frame_lines = [
+                item for item in self.line_observations
+                if item.frame_index == frame_index
+            ]
+            frame_errors = self._keyframe_constraint_errors(
+                frame_points,
+                frame_lines,
             )
-        return contributing_frames if not errors else [], errors
+            if frame_errors:
+                errors.extend(
+                    f"Frame {frame_index + 1}: {error}"
+                    for error in frame_errors
+                )
+                continue
+            try:
+                image_to_pitch = estimate_homography_with_line_constraints(
+                    np.asarray(
+                        [item.image_point for item in frame_points],
+                        dtype=np.float64,
+                    ).reshape(-1, 2),
+                    np.asarray(
+                        [self.landmarks[item.landmark_key].pitch_point
+                         for item in frame_points],
+                        dtype=np.float64,
+                    ).reshape(-1, 2),
+                    [
+                        LinePointObservation(item.line_key, item.image_point)
+                        for item in frame_lines
+                    ],
+                    self.field_lines,
+                )
+                pitch_to_image = np.linalg.inv(image_to_pitch)
+                pitch_corners = np.asarray(
+                    [self.landmarks[key].pitch_point for key in (1, 2, 4, 3)],
+                    dtype=np.float64,
+                )
+                image_corners = cv2.perspectiveTransform(
+                    pitch_corners.reshape(-1, 1, 2),
+                    pitch_to_image,
+                ).reshape(-1, 2)
+                height, width = self.selected_frames[frame_index].frame.shape[:2]
+                geometry = validate_projected_pitch_geometry(
+                    image_corners,
+                    frame_width=width,
+                    frame_height=height,
+                )
+                if not geometry.valid:
+                    errors.extend(
+                        f"Frame {frame_index + 1}: {error}"
+                        for error in geometry.errors
+                    )
+                    continue
+            except (ValueError, np.linalg.LinAlgError) as error:
+                errors.append(f"Frame {frame_index + 1}: {error}")
+                continue
+            valid_frames.append(frame_index)
+        if len(valid_frames) < 2:
+            errors.append(
+                f"Slechts {len(valid_frames)} zelfstandig oplosbare beelden; "
+                "beide doelzijden zijn vereist."
+            )
+        return valid_frames if not errors else [], errors
 
     def _keyframe_constraint_errors(
         self,
@@ -746,8 +842,9 @@ class OpenCvCalibrationApp:
     def _draw_select_sidebar(self, canvas: np.ndarray, y: int) -> None:
         self._draw_wrapped_text(
             canvas,
-            "Kies 3-8 frames met overlap: linker doel, minimaal één "
-            "tussenbeeld en rechter doel. Alleen bij de doelen klik je palen.",
+            "Kies twee scherpe beelden: eerst de linker doelzijde, daarna "
+            "de rechter doelzijde. Beide veldhoeken en beide doelpalen moeten "
+            "goed zichtbaar zijn.",
             24,
             y,
             310,
@@ -818,7 +915,7 @@ class OpenCvCalibrationApp:
             return
 
         selected = self.selected_frames[self.annotation_frame_index]
-        goalpost_keys = (5, 6, 8, 7)
+        goalpost_keys = tuple(self.landmarks)
 
         current_marked = {
             item.landmark_key
@@ -876,8 +973,8 @@ class OpenCvCalibrationApp:
         self._text(
             canvas,
             (
-                f"DOELPALEN: {completed_landmarks}/{len(goalpost_keys)}  |  "
-                f"{total_observations} waarnemingen"
+                f"EXACTE PUNTEN: {total_observations}  |  "
+                f"CONSTRAINTS: {frame_constraints}/10"
             ),
             (24, y),
             0.46,
@@ -910,8 +1007,8 @@ class OpenCvCalibrationApp:
         )
         y += 22
 
-        indicator_spacing = 82
-        indicator_start_x = 96
+        indicator_spacing = 42
+        indicator_start_x = 67
         indicator_y = y + 10
 
         for index, key in enumerate(goalpost_keys):
@@ -999,8 +1096,8 @@ class OpenCvCalibrationApp:
 
         controls_y = self.WINDOW_HEIGHT - 104
         controls = [
-            "A = begeleid vanaf LINKER doel",
-            "B = begeleid vanaf RECHTER doel",
+            "1-8 = exact punt | A/B = doelbegeleiding",
+            "M = witte lijnmodus (minimaal 3 klikken)",
             "Muiswiel of +/- = zoom | 0 = herstel",
             "U undo | R frame leeg | P/N frame",
             "Enter controleren | Esc stoppen",
@@ -1116,8 +1213,8 @@ class OpenCvCalibrationApp:
 
         controls_y = self.WINDOW_HEIGHT - 104
         controls = [
-            "A = opnieuw vanaf LINKER doel",
-            "B = opnieuw vanaf RECHTER doel",
+            "1-5 = kies witte veldlijn | M = puntmodus",
+            "Gebruik meerdere richtingen per camerastand",
             "Muiswiel of +/- = zoom | 0 = herstel",
             "U undo | R frame leeg | P/N frame",
             "Enter controleren | Esc stoppen",
@@ -1474,6 +1571,8 @@ class MultiFramePitchCalibrator:
         ] = []
         self.quality_report: CalibrationQualityReport | None = None
         self.source_video_path: Path | None = None
+        self.camera_motion_samples: dict[int, np.ndarray] = {}
+        self.panorama_to_pitch_matrix: np.ndarray | None = None
         self.landmarks = self._create_landmark_definitions()
         self.field_lines = create_boundary_line_definitions(
             pitch_width=self.profile.width_m,
@@ -1495,19 +1594,11 @@ class MultiFramePitchCalibrator:
             self.observations,
             self.line_observations,
         ) = app.run()
-        transforms = self._calculate_frame_transforms()
-        self.frame_transforms = transforms
-
-        # Analyseer eerst de geometrie van alle frame-transformaties.
-        panorama_report = PanoramaBuilder(
-                selected_frames=self.selected_frames,
-                frame_transforms=transforms,
-                registration_diagnostics=self.frame_registration_diagnostics,
-        ).analyze()
-
-        print()
-        panorama_report.print_summary()
-        print()
+        # Iedere camerastand wordt zelfstandig gekalibreerd. Er is bewust
+        # geen panorama- of framekoppeling meer nodig voor het veldmodel.
+        self.frame_transforms = [
+            np.eye(3, dtype=np.float64) for _item in self.selected_frames
+        ]
 
         keyframes, keyframe_failures = self._calculate_keyframes()
         if not keyframes:
@@ -1522,7 +1613,7 @@ class MultiFramePitchCalibrator:
             selected_index: keyframe
             for selected_index, keyframe in keyframes
         }
-        for observation in self._goalpost_observations():
+        for observation in self.observations:
             keyframe = keyframe_by_selected_index.get(observation.frame_index)
             if keyframe is None:
                 continue
@@ -1567,14 +1658,11 @@ class MultiFramePitchCalibrator:
             self.quality_report,
             pitch_width=self.profile.width_m,
             pitch_length=self.profile.length_m,
-            frame_new_coverage=[
-                frame_report.new_coverage_ratio
-                for frame_report in panorama_report.frame_reports
-            ],
+            frame_new_coverage=[1.0 for _item in keyframes],
             additional_failures=keyframe_failures,
-            supporting_line_point_count=0,
-            geometry_coverage=self._guided_geometry_coverage(),
-            model_geometry_support=True,
+            supporting_line_point_count=len(self.line_observations),
+            geometry_coverage=self._independent_geometry_coverage(),
+            model_geometry_support=False,
         )
 
         reference_index, reference_keyframe = keyframes[0]
@@ -1595,6 +1683,18 @@ class MultiFramePitchCalibrator:
             frame_height=frame_height,
             quality=self.quality_report,
             keyframes=tuple(keyframe for _, keyframe in keyframes),
+            camera_motion=None,
+        )
+
+    def _create_camera_motion_trajectory(self) -> CameraMotionTrajectory | None:
+        if self.panorama_to_pitch_matrix is None or not self.camera_motion_samples:
+            return None
+        return CameraMotionTrajectory(
+            panorama_to_pitch_matrix=self.panorama_to_pitch_matrix,
+            keyframes=tuple(
+                CameraMotionKeyframe(frame_number, matrix)
+                for frame_number, matrix in self.camera_motion_samples.items()
+            ),
         )
 
     def _guided_geometry_coverage(self) -> tuple[float, float, float]:
@@ -1607,6 +1707,26 @@ class MultiFramePitchCalibrator:
         hull_coverage = 1.0 if complete_goal_geometry else 0.0
         return width_coverage, length_coverage, hull_coverage
 
+    def _independent_geometry_coverage(self) -> tuple[float, float, float]:
+        used_lines = {item.line_key for item in self.line_observations}
+        used_points = {item.landmark_key for item in self.observations}
+        width_support = bool(used_lines & {3, 4}) or bool(used_points & {1, 2, 3, 4})
+        length_support = bool(used_lines & {1, 2, 5}) or bool(used_points)
+        supported_frames = sum(
+            not _constraint_errors_for_keyframe(
+                [item for item in self.observations if item.frame_index == index],
+                [item for item in self.line_observations if item.frame_index == index],
+                self.field_lines,
+            )
+            for index in range(len(self.selected_frames))
+        )
+        frame_ratio = supported_frames / max(1, len(self.selected_frames))
+        return (
+            1.0 if width_support else 0.0,
+            1.0 if length_support else 0.0,
+            frame_ratio,
+        )
+
     def _goalpost_observations(self) -> list[LandmarkObservation]:
         return [
             item for item in self.observations
@@ -1617,33 +1737,47 @@ class MultiFramePitchCalibrator:
         self,
     ) -> tuple[list[tuple[int, CalibrationKeyframe]], list[str]]:
         failures: list[str] = []
-        panorama_points: list[tuple[float, float]] = []
-        pitch_points: list[tuple[float, float]] = []
-        for observation in self._goalpost_observations():
-            transformed = cv2.perspectiveTransform(
-                np.asarray([[observation.image_point]], dtype=np.float64),
-                self.frame_transforms[observation.frame_index],
-            )[0, 0]
-            panorama_points.append((float(transformed[0]), float(transformed[1])))
-            pitch_points.append(
-                self.landmarks[observation.landmark_key].pitch_point
-            )
-        try:
-            panorama_to_pitch = estimate_homography_with_line_constraints(
-                np.asarray(panorama_points, dtype=np.float64).reshape(-1, 2),
-                np.asarray(pitch_points, dtype=np.float64).reshape(-1, 2),
-                [],
-                self.field_lines,
-            )
-        except ValueError as error:
-            return [], [f"Gezamenlijke veldkalibratie: {error}"]
-
         keyframes: list[tuple[int, CalibrationKeyframe]] = []
         for frame_index, selected in enumerate(self.selected_frames):
-            image_to_pitch = (
-                panorama_to_pitch @ self.frame_transforms[frame_index]
+            point_observations = [
+                item for item in self.observations
+                if item.frame_index == frame_index
+            ]
+            line_observations = [
+                item for item in self.line_observations
+                if item.frame_index == frame_index
+            ]
+            constraint_errors = _constraint_errors_for_keyframe(
+                point_observations,
+                line_observations,
+                self.field_lines,
             )
-            image_to_pitch /= image_to_pitch[2, 2]
+            if constraint_errors:
+                failures.extend(
+                    f"Keyframe {frame_index + 1}: {error}"
+                    for error in constraint_errors
+                )
+                continue
+            try:
+                image_to_pitch = estimate_homography_with_line_constraints(
+                    np.asarray(
+                        [item.image_point for item in point_observations],
+                        dtype=np.float64,
+                    ).reshape(-1, 2),
+                    np.asarray(
+                        [self.landmarks[item.landmark_key].pitch_point
+                         for item in point_observations],
+                        dtype=np.float64,
+                    ).reshape(-1, 2),
+                    [
+                        LinePointObservation(item.line_key, item.image_point)
+                        for item in line_observations
+                    ],
+                    self.field_lines,
+                )
+            except ValueError as error:
+                failures.append(f"Keyframe {frame_index + 1}: {error}")
+                continue
             pitch_to_image = np.linalg.inv(image_to_pitch)
             image_corners = cv2.perspectiveTransform(
                 self.profile.world_corners.reshape(-1, 1, 2).astype(np.float64),
@@ -1657,10 +1791,7 @@ class MultiFramePitchCalibrator:
             )
             line_rms = self._line_rms_error(
                 image_to_pitch,
-                [
-                    item for item in self.line_observations
-                    if item.frame_index == frame_index
-                ],
+                line_observations,
             )
             geometry_errors = list(geometry.errors)
             if line_rms is not None and line_rms > 5.0:
@@ -1675,7 +1806,7 @@ class MultiFramePitchCalibrator:
                 image_corners=image_corners,
                 point_count=sum(
                     item.frame_index == frame_index
-                    for item in self._goalpost_observations()
+                    for item in self.observations
                 ),
                 line_point_count=sum(
                     item.frame_index == frame_index
@@ -1748,6 +1879,97 @@ class MultiFramePitchCalibrator:
         if not self.selected_frames:
             raise RuntimeError("Geen geselecteerde frames beschikbaar.")
 
+        return self._create_independent_keyframe_preview(
+            calibration,
+            grid_interval_m,
+        )
+
+    def _create_independent_keyframe_preview(
+        self,
+        calibration: PitchCalibration,
+        grid_interval_m: float,
+    ) -> np.ndarray:
+        """Maak een contactblad waarop iedere camerastand apart te beoordelen is."""
+        keyframe_by_number = {
+            item.frame_number: item for item in calibration.keyframes
+        }
+        tile_width, tile_height = 640, 360
+        header_height = 72
+        columns = 2
+        rows = int(np.ceil(len(self.selected_frames) / columns))
+        preview = np.zeros(
+            (header_height + rows * tile_height, columns * tile_width, 3),
+            dtype=np.uint8,
+        )
+        quality = calibration.quality
+        status = (
+            quality.assessment.status.value.upper()
+            if quality is not None and quality.assessment is not None
+            else "ONBEKEND"
+        )
+        confidence = (
+            quality.assessment.confidence_score
+            if quality is not None and quality.assessment is not None
+            else 0.0
+        )
+        cv2.putText(
+            preview,
+            "ONAFHANKELIJKE KEYFRAME-KALIBRATIE",
+            (18, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            preview,
+            f"Status {status} | confidence {confidence:.1f}/100 | "
+            "controleer elk geel veld afzonderlijk",
+            (18, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (0, 220, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        for index, selected in enumerate(self.selected_frames):
+            image = selected.frame.copy()
+            keyframe = keyframe_by_number.get(selected.frame_number)
+            if keyframe is not None:
+                self._draw_keyframe_pitch_grid(
+                    image,
+                    keyframe.pitch_to_image_matrix,
+                    grid_interval_m,
+                )
+            label = (
+                f"Keyframe {index + 1} | {selected.time_seconds:.2f}s | "
+                + ("GELDIG" if keyframe is not None and keyframe.is_valid else "ONGELDIG")
+            )
+            cv2.rectangle(image, (0, 0), (image.shape[1], 42), (20, 20, 20), -1)
+            cv2.putText(
+                image,
+                label,
+                (16, 29),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            tile = cv2.resize(image, (tile_width, tile_height))
+            row, column = divmod(index, columns)
+            y = header_height + row * tile_height
+            x = column * tile_width
+            preview[y:y + tile_height, x:x + tile_width] = tile
+        return preview
+
+    def _create_panorama_preview_legacy(
+        self,
+        calibration: PitchCalibration,
+        grid_interval_m: float,
+    ) -> np.ndarray:
+        """Behouden diagnostiek; niet gebruikt voor de actieve kalibratie."""
         if len(self.frame_transforms) != len(self.selected_frames):
             self.frame_transforms = self._calculate_frame_transforms()
 
@@ -2413,6 +2635,9 @@ class MultiFramePitchCalibrator:
         transforms: list[np.ndarray] = [
             np.eye(3, dtype=np.float64)
         ]
+        self.camera_motion_samples = {
+            self.selected_frames[0].frame_number: np.eye(3, dtype=np.float64)
+        }
         self.frame_registration_diagnostics = []
 
         bridge_capture = (
@@ -2428,7 +2653,11 @@ class MultiFramePitchCalibrator:
                 frame_index
             ].frame
 
-            current_to_previous, diagnostics = self._estimate_transform_chain(
+            (
+                current_to_previous,
+                diagnostics,
+                local_motion_samples,
+            ) = self._estimate_transform_chain(
                 previous_frame=previous_frame,
                 current_frame=current_frame,
                 previous_frame_number=self.selected_frames[
@@ -2447,6 +2676,13 @@ class MultiFramePitchCalibrator:
             )
             current_to_reference /= current_to_reference[2, 2]
             transforms.append(current_to_reference)
+            previous_to_reference = transforms[frame_index - 1]
+            for sample_frame_number, sample_to_previous in local_motion_samples:
+                sample_to_reference = previous_to_reference @ sample_to_previous
+                sample_to_reference /= sample_to_reference[2, 2]
+                self.camera_motion_samples[
+                    sample_frame_number
+                ] = sample_to_reference
 
             print(
                 f"Frame {frame_index + 1} gekoppeld aan referentieframe."
@@ -2465,15 +2701,20 @@ class MultiFramePitchCalibrator:
         source_frame_index: int,
         target_frame_index: int,
         capture: cv2.VideoCapture | None,
-    ) -> tuple[np.ndarray, FrameRegistrationDiagnostics]:
+    ) -> tuple[
+        np.ndarray,
+        FrameRegistrationDiagnostics,
+        list[tuple[int, np.ndarray]],
+    ]:
         gap = current_frame_number - previous_frame_number
         if capture is None or gap <= 45:
-            return self._estimate_image_transform(
+            transform, diagnostics = self._estimate_image_transform(
                 current_frame,
                 previous_frame,
                 source_frame_index,
                 target_frame_index,
             )
+            return transform, diagnostics, [(current_frame_number, transform)]
 
         step_numbers = list(
             range(previous_frame_number + 30, current_frame_number, 30)
@@ -2481,6 +2722,8 @@ class MultiFramePitchCalibrator:
         accumulated = np.eye(3, dtype=np.float64)
         target = previous_frame
         diagnostics_items: list[FrameRegistrationDiagnostics] = []
+        motion_samples: list[tuple[int, np.ndarray]] = []
+        target_frame_number = previous_frame_number
         for step_number in step_numbers:
             if step_number == current_frame_number:
                 source = current_frame
@@ -2492,21 +2735,34 @@ class MultiFramePitchCalibrator:
                         f"Automatisch brugframe {step_number} kon niet worden gelezen."
                     )
             try:
-                step_transform, step_diagnostics = self._estimate_image_transform(
-                    source,
-                    target,
-                    source_frame_index,
-                    target_frame_index,
+                (
+                    step_transform,
+                    step_diagnostics,
+                    interval_samples,
+                ) = self._register_interval_adaptively(
+                    capture=capture,
+                    target=target,
+                    target_frame_number=target_frame_number,
+                    source=source,
+                    source_frame_number=step_number,
+                    source_frame_index=source_frame_index,
+                    target_frame_index=target_frame_index,
                 )
             except RuntimeError as error:
                 raise RuntimeError(
                     "Automatische framekoppeling mislukte rond videoframe "
                     f"{step_number}. Kies een extra handmatig tussenframe."
                 ) from error
-            accumulated = accumulated @ step_transform
+            accumulated_before_step = accumulated.copy()
+            for sample_number, sample_to_target in interval_samples:
+                sample_to_reference = accumulated_before_step @ sample_to_target
+                sample_to_reference /= sample_to_reference[2, 2]
+                motion_samples.append((sample_number, sample_to_reference))
+            accumulated = accumulated_before_step @ step_transform
             accumulated /= accumulated[2, 2]
-            diagnostics_items.append(step_diagnostics)
+            diagnostics_items.extend(step_diagnostics)
             target = source
+            target_frame_number = step_number
 
         candidate_matches = sum(
             item.candidate_matches or 0 for item in diagnostics_items
@@ -2519,10 +2775,89 @@ class MultiFramePitchCalibrator:
         return accumulated, FrameRegistrationDiagnostics(
             source_frame_index=source_frame_index,
             target_frame_index=target_frame_index,
-            method=f"Automatische ORB/ECC-keten ({len(step_numbers)} stappen)",
+            method=(
+                f"Automatische ORB/ECC-keten "
+                f"({len(diagnostics_items)} stappen)"
+            ),
             candidate_matches=candidate_matches or None,
             inlier_count=inlier_count or None,
             median_error_pixels=float(np.median(errors)) if errors else None,
+        ), motion_samples
+
+    def _register_interval_adaptively(
+        self,
+        capture: cv2.VideoCapture,
+        target: np.ndarray,
+        target_frame_number: int,
+        source: np.ndarray,
+        source_frame_number: int,
+        source_frame_index: int,
+        target_frame_index: int,
+    ) -> tuple[
+        np.ndarray,
+        list[FrameRegistrationDiagnostics],
+        list[tuple[int, np.ndarray]],
+    ]:
+        try:
+            transform, diagnostics = self._estimate_image_transform(
+                source,
+                target,
+                source_frame_index,
+                target_frame_index,
+            )
+            return transform, [diagnostics], [(source_frame_number, transform)]
+        except RuntimeError as direct_error:
+            gap = source_frame_number - target_frame_number
+            if gap <= 3:
+                raise RuntimeError(
+                    "Zelfs opeenvolgende brugframes hebben onvoldoende overlap."
+                ) from direct_error
+
+        middle_frame_number = (target_frame_number + source_frame_number) // 2
+        capture.set(cv2.CAP_PROP_POS_FRAMES, middle_frame_number)
+        success, middle = capture.read()
+        if not success:
+            raise RuntimeError(
+                f"Automatisch brugframe {middle_frame_number} kon niet worden gelezen."
+            )
+
+        (
+            middle_to_target,
+            left_diagnostics,
+            left_samples,
+        ) = self._register_interval_adaptively(
+            capture,
+            target,
+            target_frame_number,
+            middle,
+            middle_frame_number,
+            source_frame_index,
+            target_frame_index,
+        )
+        (
+            source_to_middle,
+            right_diagnostics,
+            right_samples,
+        ) = self._register_interval_adaptively(
+            capture,
+            middle,
+            middle_frame_number,
+            source,
+            source_frame_number,
+            source_frame_index,
+            target_frame_index,
+        )
+        source_to_target = middle_to_target @ source_to_middle
+        source_to_target /= source_to_target[2, 2]
+        right_samples_in_target: list[tuple[int, np.ndarray]] = []
+        for frame_number, sample_to_middle in right_samples:
+            sample_to_target = middle_to_target @ sample_to_middle
+            sample_to_target /= sample_to_target[2, 2]
+            right_samples_in_target.append((frame_number, sample_to_target))
+        return (
+            source_to_target,
+            [*left_diagnostics, *right_diagnostics],
+            [*left_samples, *right_samples_in_target],
         )
 
     def _estimate_image_transform(

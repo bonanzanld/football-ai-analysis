@@ -7,6 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
+from football_ai.calibration.camera_motion import (
+    CameraMotionKeyframe,
+    CameraMotionTrajectory,
+)
 from football_ai.calibration.quality_report import (
     assess_calibration_quality,
     calculate_quality_report,
@@ -79,6 +83,31 @@ class PitchCalibrationJsonTests(unittest.TestCase):
         np.testing.assert_allclose(
             restored.image_to_pitch_for_frame(260),
             second_matrix,
+        )
+
+    def test_camera_motion_takes_priority_over_legacy_keyframes(self) -> None:
+        calibration = self._create_calibration(with_quality=False)
+        calibration.frame_width = 200
+        calibration.frame_height = 100
+        calibration.keyframes = (self._keyframe(0, np.eye(3)),)
+        calibration.camera_motion = CameraMotionTrajectory(
+            panorama_to_pitch_matrix=np.eye(3),
+            keyframes=(
+                CameraMotionKeyframe(0, np.eye(3)),
+                CameraMotionKeyframe(
+                    100,
+                    np.array(
+                        [[1.0, 0.0, 100.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                    ),
+                ),
+            ),
+        )
+
+        np.testing.assert_allclose(
+            calibration.image_to_pitch_for_frame(50),
+            np.array(
+                [[1.0, 0.0, 50.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            ),
         )
 
     @staticmethod

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
 from football_ai.pitch.field_model import create_half_pitch_profile
 from football_ai.pitch.manual_calibrator import (
+    FrameLineObservation,
     LandmarkObservation,
     MultiFramePitchCalibrator,
     OpenCvCalibrationApp,
@@ -15,23 +17,24 @@ from football_ai.pitch.manual_calibrator import (
 
 
 class KeyframeCalibrationTests(unittest.TestCase):
-    def test_calculates_keyframes_from_shared_panorama_geometry(self) -> None:
+    def test_calculates_each_keyframe_from_its_own_observations(self) -> None:
         calibrator = MultiFramePitchCalibrator(create_half_pitch_profile())
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         calibrator.selected_frames = [
             SelectedFrame(frame, 100, 3.33),
             SelectedFrame(frame.copy(), 300, 10.0),
         ]
-        calibrator.frame_transforms = [
-            np.eye(3, dtype=np.float64),
-            np.eye(3, dtype=np.float64),
-        ]
-        pitch_to_image = np.array(
-            [[12.0, 1.5, 150.0], [0.8, 7.5, 80.0], [0.002, 0.001, 1.0]]
+        pitch_to_images = (
+            np.array(
+                [[12.0, 1.5, 150.0], [0.8, 7.5, 80.0], [0.002, 0.001, 1.0]]
+            ),
+            np.array(
+                [[10.5, -1.0, 260.0], [0.4, 7.0, 95.0], [0.001, -0.001, 1.0]]
+            ),
         )
 
-        for frame_index, landmark_keys in enumerate(((5, 6), (8, 7))):
-            for landmark_key in landmark_keys:
+        for frame_index, pitch_to_image in enumerate(pitch_to_images):
+            for landmark_key in (1, 2, 3, 4):
                 pitch_point = calibrator.landmarks[landmark_key].pitch_point
                 image_point = self._project([pitch_point], pitch_to_image)[0]
                 calibrator.observations.append(
@@ -41,14 +44,29 @@ class KeyframeCalibrationTests(unittest.TestCase):
                         tuple(image_point),
                     )
                 )
+            for image_point in self._project(
+                [(0.0, 8.0), (0.0, 28.0), (0.0, 52.0)],
+                pitch_to_image,
+            ):
+                calibrator.line_observations.append(
+                    FrameLineObservation(frame_index, 3, tuple(image_point))
+                )
         keyframes, failures = calibrator._calculate_keyframes()
 
         self.assertEqual(failures, [])
         self.assertEqual(len(keyframes), 2)
         self.assertTrue(all(item[1].is_valid for item in keyframes))
         self.assertTrue(
-            all(item[1].line_rms_error_pixels is None for item in keyframes)
+            all(item[1].line_rms_error_pixels < 0.1 for item in keyframes)
         )
+        preview = calibrator._create_independent_keyframe_preview(
+            SimpleNamespace(
+                keyframes=tuple(item[1] for item in keyframes),
+                quality=None,
+            ),
+            5.0,
+        )
+        self.assertEqual(preview.shape, (432, 1280, 3))
 
     def test_landmark_definitions_follow_top_down_diagram(self) -> None:
         calibrator = MultiFramePitchCalibrator(create_half_pitch_profile())

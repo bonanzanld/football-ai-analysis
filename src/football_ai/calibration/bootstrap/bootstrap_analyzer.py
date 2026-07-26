@@ -73,6 +73,7 @@ class PitchBootstrapReport:
                     "maximum_distance": cluster.maximum_distance,
                     "support_ratio": cluster.support_ratio,
                     "stable": cluster.stable,
+                    "view_position": cluster.view_position,
                 }
                 for cluster in self.clustering.clusters
             ],

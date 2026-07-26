@@ -9,6 +9,7 @@ from football_ai.tracking.entity_corrections import (
     TeamAssignment,
 )
 from football_ai.tracking.entity_resolver import ResolvedEntity
+from football_ai.detection.ball_tracking import BallObservation
 
 
 TEAM_COLORS: dict[int, tuple[int, int, int]] = {
@@ -19,6 +20,43 @@ TEAM_COLORS: dict[int, tuple[int, int, int]] = {
 UNKNOWN_COLOR = (0, 255, 255)
 FOOTPOINT_COLOR = (0, 255, 0)
 FOOTPOINT_OUTLINE_COLOR = (0, 64, 0)
+BALL_COLOR = (0, 255, 255)
+BALL_PREDICTED_COLOR = (0, 165, 255)
+
+
+def draw_ball_observation(
+    frame: np.ndarray,
+    observation: BallObservation | None,
+) -> np.ndarray:
+    """Draw a detected or temporarily predicted ball without hiding the frame."""
+
+    annotated = frame.copy()
+    if observation is None:
+        return annotated
+    frame_height, frame_width = annotated.shape[:2]
+    center = np.asarray(observation.center, dtype=np.float64)
+    if center.shape != (2,) or not np.all(np.isfinite(center)):
+        return annotated
+    x = int(np.clip(center[0], 0, frame_width - 1))
+    y = int(np.clip(center[1], 0, frame_height - 1))
+    color = BALL_COLOR if observation.source == "detected" else BALL_PREDICTED_COLOR
+    radius = 10 if observation.source == "detected" else 8
+    cv2.circle(annotated, (x, y), radius, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(annotated, (x, y), radius, color, 2, cv2.LINE_AA)
+    label = f"BAL {observation.confidence:.0%}"
+    if observation.source == "predicted":
+        label += " voorspeld"
+    cv2.putText(
+        annotated,
+        label,
+        (x + 14, max(22, y - 10)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
 
 
 def draw_footpoint(

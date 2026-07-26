@@ -107,6 +107,8 @@ class TrackManager:
             center_y,
         )
 
+        box = tuple(float(value) for value in xyxy)
+
         box_height = float(
             xyxy[3] - xyxy[1]
         )
@@ -127,6 +129,12 @@ class TrackManager:
             state.positions.append(
                 pixel_position
             )
+
+            state.observation_frames.append(
+                frame_number
+            )
+
+            state.boxes.append(box)
 
             state.box_heights.append(
                 box_height
@@ -162,6 +170,12 @@ class TrackManager:
         state.positions.append(
             pixel_position
         )
+
+        state.observation_frames.append(
+            frame_number
+        )
+
+        state.boxes.append(box)
 
         state.box_heights.append(
             box_height

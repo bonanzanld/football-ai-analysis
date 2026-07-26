@@ -20,6 +20,17 @@ class TrackState:
 
     frames_seen: int = 0
 
+    # Exact frame en detectiekader per waarneming. Deze gegevens zijn
+    # onafhankelijk van een eventuele veldprojectie en vormen de basis
+    # voor handmatige trackreview en correcties.
+    observation_frames: list[int] = field(
+        default_factory=list
+    )
+
+    boxes: list[tuple[float, float, float, float]] = field(
+        default_factory=list
+    )
+
     # Middenpunten van bounding boxes in beeldcoördinaten.
     positions: list[tuple[float, float]] = field(
         default_factory=list
@@ -124,6 +135,17 @@ class TrackState:
             return None
 
         return self.positions[-1]
+
+    @property
+    def latest_box(
+        self,
+    ) -> tuple[float, float, float, float] | None:
+        """Meest recente detectiekader van deze track."""
+
+        if not self.boxes:
+            return None
+
+        return self.boxes[-1]
 
     @property
     def displacement_pixels(self) -> float:

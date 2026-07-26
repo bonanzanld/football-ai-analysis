@@ -105,6 +105,29 @@ class TeamClassifier:
             self.team_by_tracker_id
         )
 
+    def classify_box(
+        self,
+        frame: np.ndarray,
+        bounding_box: np.ndarray,
+        minimum_margin: float = 0.08,
+    ) -> tuple[int | None, float]:
+        """Classify current appearance without trusting a track's history.
+
+        This is used to detect tracker ID switches. The returned confidence is
+        the relative distance margin between both learned team centres.
+        """
+        if self.cluster_centers is None:
+            return None, 0.0
+        feature = extract_shirt_feature(frame=frame, bounding_box=bounding_box)
+        if feature is None:
+            return None, 0.0
+        distances = np.linalg.norm(self.cluster_centers - feature[None, :], axis=1)
+        order = np.argsort(distances)
+        best, other = int(order[0]), int(order[1])
+        denominator = max(float(distances[other]), 1e-6)
+        margin = max(0.0, (float(distances[other]) - float(distances[best])) / denominator)
+        return (best if margin >= minimum_margin else None), margin
+
     def _get_average_features(
         self,
     ) -> tuple[

@@ -201,6 +201,29 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(result.state, PossessionState.CONTROLLED)
         self.assertEqual(result.identity_id, player.identity_id)
 
+    def test_opponent_deflection_creates_turnover_without_full_control(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=12,
+            opponent_control_radius=0.45,
+            interception_contact_radius=0.65,
+            low_speed_threshold=1.0,
+            direction_change_degrees=30.0,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 190)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, ball(2, 160), [])
+        tracker.update(3, ball(3, 182), [opponent])
+        result = tracker.update(4, ball(4, 175), [opponent])
+
+        self.assertEqual(result.state, PossessionState.CONTESTED)
+        self.assertIsNone(result.identity_id)
+        self.assertEqual(len(tracker.turnovers), 1)
+        self.assertEqual(tracker.turnovers[0].from_label, "Speler 1")
+        self.assertEqual(tracker.turnovers[0].to_label, "Speler 2")
+
     def test_inferred_possession_counts_for_team_and_player_statistics(self) -> None:
         observations = [
             PossessionObservation(

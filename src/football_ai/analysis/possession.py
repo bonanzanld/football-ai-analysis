@@ -80,6 +80,7 @@ class PossessionTracker:
         opponent_confirmation_frames: int = 12,
         teammate_control_radius: float = 0.85,
         opponent_control_radius: float = 0.45,
+        interception_contact_radius: float = 0.65,
         dwell_control_frames: int = 6,
         motion_evidence_memory_frames: int = 6,
         low_speed_threshold: float = 4.0,
@@ -96,6 +97,7 @@ class PossessionTracker:
         )
         self.teammate_control_radius = teammate_control_radius
         self.opponent_control_radius = opponent_control_radius
+        self.interception_contact_radius = interception_contact_radius
         self.dwell_control_frames = max(confirmation_frames, dwell_control_frames)
         self.motion_evidence_memory_frames = motion_evidence_memory_frames
         self.low_speed_threshold = low_speed_threshold
@@ -114,6 +116,8 @@ class PossessionTracker:
         self._last_change_frame: int | None = None
         self._ball_centers: list[np.ndarray] = []
         self._motion_evidence_age: int | None = None
+        self._current_motion_evidence = False
+        self._current_interception_evidence = False
         self.passes: list[PassEvent] = []
         self.turnovers: list[TurnoverEvent] = []
 
@@ -129,6 +133,49 @@ class PossessionTracker:
             entities,
         )
         key = _entity_key(candidate)
+        if (
+            candidate is not None
+            and self._owner is not None
+            and candidate.team != self._owner.team
+            and normalized_distance <= self.interception_contact_radius
+            and self._current_interception_evidence
+            and ball is not None
+            and ball.source == "detected"
+            and ball.confidence >= 0.15
+        ):
+            previous = self._owner
+            start_frame = (
+                self._last_change_frame
+                if self._last_change_frame is not None
+                else frame_number
+            )
+            self.turnovers.append(
+                TurnoverEvent(
+                    start_frame=start_frame,
+                    end_frame=frame_number,
+                    from_identity_id=previous.identity_id,
+                    to_identity_id=candidate.identity_id,
+                    from_label=previous.label,
+                    to_label=candidate.label,
+                    from_team=previous.team.value,
+                    to_team=candidate.team.value,
+                    confidence=confidence,
+                )
+            )
+            self._owner = None
+            self._owner_key = None
+            self._candidate = None
+            self._candidate_key = None
+            self._candidate_count = 0
+            self._candidate_has_motion_evidence = False
+            self._missing = 0
+            self._last_change_frame = frame_number
+            return _observation(
+                frame_number,
+                PossessionState.CONTESTED,
+                None,
+                confidence,
+            )
         if (
             candidate is not None
             and self._owner is not None
@@ -246,6 +293,8 @@ class PossessionTracker:
         return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
 
     def _update_ball_motion(self, ball: BallObservation | None) -> None:
+        self._current_motion_evidence = False
+        self._current_interception_evidence = False
         if self._motion_evidence_age is not None:
             self._motion_evidence_age += 1
             if self._motion_evidence_age > self.motion_evidence_memory_frames:
@@ -278,6 +327,12 @@ class PossessionTracker:
                 sharp_turn = angle >= self.direction_change_degrees
         if low_speed or strong_deceleration or sharp_turn:
             self._motion_evidence_age = 0
+            self._current_motion_evidence = True
+        # Een directe onderschepping vereist een zichtbare koerswijziging.
+        # Alleen vertragen is onvoldoende: de bal kan ook gewoon langs een
+        # tegenstander rollen of daar kort stilvallen.
+        if sharp_turn:
+            self._current_interception_evidence = True
 
     def _has_recent_motion_evidence(self) -> bool:
         return self._motion_evidence_age is not None

@@ -67,6 +67,7 @@ class TurnoverEvent:
     to_label: str
     from_team: str
     to_team: str
+    event_type: str
     confidence: float
 
     def to_dict(self) -> dict:
@@ -166,6 +167,7 @@ class PossessionTracker:
                     to_label=candidate.label,
                     from_team=previous.team.value,
                     to_team=candidate.team.value,
+                    event_type="intercepted_pass",
                     confidence=confidence,
                 )
             )
@@ -294,6 +296,7 @@ class PossessionTracker:
                         to_label=self._owner.label,
                         from_team=previous.team.value,
                         to_team=self._owner.team.value,
+                        event_type="possession_change",
                         confidence=confidence,
                     )
                 )

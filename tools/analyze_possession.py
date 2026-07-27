@@ -108,6 +108,10 @@ def main() -> None:
     print(f"Vermoedelijk behouden bezit: {inferred}/{len(observations)} frames")
     print(f"Duel/onzeker bezit: {contested}/{len(observations)} frames")
     print(f"Voorlopige passkandidaten: {len(tracker.passes)}")
+    intercepted = sum(
+        item.event_type == "intercepted_pass" for item in tracker.turnovers
+    )
+    print(f"Onderschepte passes: {intercepted}")
     print(f"Bevestigd balverlies: {len(tracker.turnovers)}")
     print(f"QA-video: {output_path}")
     print(f"Balbezitrapport: {report_path}")
@@ -133,6 +137,7 @@ def _render(
     team_names = _team_names(observations)
     team_frames = {team: 0 for team in team_names}
     pass_counts = {team: 0 for team in team_names}
+    failed_pass_counts = {team: 0 for team in team_names}
     loss_counts = {team: 0 for team in team_names}
     passes_at = {item.end_frame: item for item in passes}
     turnovers_at = {item.end_frame: item for item in turnovers}
@@ -207,7 +212,16 @@ def _render(
             if frame_number in turnovers_at:
                 event = turnovers_at[frame_number]
                 loss_counts[event.from_team] = loss_counts.get(event.from_team, 0) + 1
-                text = f"BALVERLIES: {_short_name(event.from_label)}"
+                if event.event_type == "intercepted_pass":
+                    failed_pass_counts[event.from_team] = (
+                        failed_pass_counts.get(event.from_team, 0) + 1
+                    )
+                    text = (
+                        f"PASS ONDERSCHEPT: {_short_name(event.from_label)}"
+                        f" > {_short_name(event.to_label)}"
+                    )
+                else:
+                    text = f"BALVERLIES: {_short_name(event.from_label)}"
                 active_event = (frame_number, text, (0, 90, 255))
                 recent_events.appendleft(active_event)
             panel_width = max(430, int(round(frame.shape[1] * 0.34)))
@@ -230,6 +244,7 @@ def _render(
                 team_names,
                 team_frames,
                 pass_counts,
+                failed_pass_counts,
                 loss_counts,
                 active_event,
                 recent_events,
@@ -281,6 +296,7 @@ def _draw_dashboard(
     team_names,
     team_frames,
     pass_counts,
+    failed_pass_counts,
     loss_counts,
     active_event,
     recent_events,
@@ -319,7 +335,20 @@ def _draw_dashboard(
         team_color = team_colors.get(team, (180, 180, 180))
         cv2.putText(canvas, name[:22], (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, team_color, 2, cv2.LINE_AA)
         cv2.putText(canvas, f"Bezit {percentage:5.1f}%", (left, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (240, 240, 240), 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"Passes {pass_counts.get(team, 0)}   Balverlies {loss_counts.get(team, 0)}", (left, y + 54), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (205, 215, 205), 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            (
+                f"Passes {pass_counts.get(team, 0)}   Mislukt "
+                f"{failed_pass_counts.get(team, 0)}   Balverlies "
+                f"{loss_counts.get(team, 0)}"
+            ),
+            (left, y + 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (205, 215, 205),
+            1,
+            cv2.LINE_AA,
+        )
         y += 78
 
     map_top = y + 22

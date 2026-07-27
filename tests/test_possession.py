@@ -86,6 +86,7 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(len(tracker.turnovers), 1)
         self.assertEqual(tracker.turnovers[0].from_team, TeamAssignment.TEAM_A.value)
         self.assertEqual(tracker.turnovers[0].to_team, TeamAssignment.TEAM_B.value)
+        self.assertEqual(tracker.turnovers[0].event_type, "possession_change")
 
     def test_interpolated_ball_can_confirm_possession_near_footpoint(self) -> None:
         tracker = PossessionTracker(confirmation_frames=2)
@@ -223,6 +224,7 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(len(tracker.turnovers), 1)
         self.assertEqual(tracker.turnovers[0].from_label, "Speler 1")
         self.assertEqual(tracker.turnovers[0].to_label, "Speler 2")
+        self.assertEqual(tracker.turnovers[0].event_type, "intercepted_pass")
 
     def test_airborne_deflection_does_not_create_ground_turnover(self) -> None:
         tracker = PossessionTracker(

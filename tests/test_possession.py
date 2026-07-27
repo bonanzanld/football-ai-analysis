@@ -60,6 +60,17 @@ class PossessionTests(unittest.TestCase):
 
         self.assertEqual(len(tracker.passes), 1)
 
+    def test_very_weak_transfer_does_not_create_pass_event(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        first = entity(1, TeamAssignment.TEAM_A, 100)
+        second = entity(2, TeamAssignment.TEAM_A, 200)
+        tracker.update(0, ball(0, 100), [first])
+        tracker.update(1, ball(1, 100), [first])
+        tracker.update(2, ball(2, 215, confidence=0.08), [second])
+        tracker.update(3, ball(3, 215, confidence=0.08), [second])
+
+        self.assertEqual(len(tracker.passes), 0)
+
     def test_confirmed_opponent_arrival_creates_turnover(self) -> None:
         tracker = PossessionTracker(
             confirmation_frames=2,

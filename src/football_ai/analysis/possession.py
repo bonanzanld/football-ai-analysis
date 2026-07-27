@@ -85,7 +85,7 @@ class PossessionTracker:
         low_speed_threshold: float = 4.0,
         deceleration_ratio: float = 0.55,
         direction_change_degrees: float = 35.0,
-        minimum_pass_confidence: float = 0.0,
+        minimum_pass_confidence: float = 0.12,
         inferred_confidence_decay: float = 0.985,
         minimum_inferred_confidence: float = 0.12,
     ) -> None:

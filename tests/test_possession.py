@@ -224,6 +224,27 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(tracker.turnovers[0].from_label, "Speler 1")
         self.assertEqual(tracker.turnovers[0].to_label, "Speler 2")
 
+    def test_airborne_deflection_does_not_create_ground_turnover(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=12,
+            interception_contact_radius=0.65,
+            interception_ground_zone_ratio=0.25,
+            low_speed_threshold=1.0,
+            direction_change_degrees=30.0,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 190)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, BallObservation(2, (160, 85), (157, 82, 163, 88), 0.9, "detected"), [])
+        tracker.update(3, BallObservation(3, (182, 85), (179, 82, 185, 88), 0.9, "detected"), [opponent])
+        result = tracker.update(4, BallObservation(4, (175, 85), (172, 82, 178, 88), 0.9, "detected"), [opponent])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.identity_id, owner.identity_id)
+        self.assertEqual(len(tracker.turnovers), 0)
+
     def test_inferred_possession_counts_for_team_and_player_statistics(self) -> None:
         observations = [
             PossessionObservation(

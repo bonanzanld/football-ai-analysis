@@ -81,6 +81,7 @@ class PossessionTracker:
         teammate_control_radius: float = 0.85,
         opponent_control_radius: float = 0.45,
         interception_contact_radius: float = 0.65,
+        interception_ground_zone_ratio: float = 0.25,
         dwell_control_frames: int = 6,
         motion_evidence_memory_frames: int = 6,
         low_speed_threshold: float = 4.0,
@@ -98,6 +99,7 @@ class PossessionTracker:
         self.teammate_control_radius = teammate_control_radius
         self.opponent_control_radius = opponent_control_radius
         self.interception_contact_radius = interception_contact_radius
+        self.interception_ground_zone_ratio = interception_ground_zone_ratio
         self.dwell_control_frames = max(confirmation_frames, dwell_control_frames)
         self.motion_evidence_memory_frames = motion_evidence_memory_frames
         self.low_speed_threshold = low_speed_threshold
@@ -142,6 +144,11 @@ class PossessionTracker:
             and ball is not None
             and ball.source == "detected"
             and ball.confidence >= 0.15
+            and _is_in_ground_contact_zone(
+                ball,
+                candidate,
+                self.interception_ground_zone_ratio,
+            )
         ):
             previous = self._owner
             start_frame = (
@@ -380,6 +387,23 @@ def _nearest_candidate(
         if second.team != best.team and second_distance - best_distance < 0.22:
             return None, PossessionState.CONTESTED, confidence, best_distance
     return best, PossessionState.CONTROLLED, confidence, best_distance
+
+
+def _is_in_ground_contact_zone(
+    ball: BallObservation,
+    entity: TimelineEntity,
+    maximum_height_ratio: float,
+) -> bool:
+    """Return whether the ball is close enough to the player's ground plane.
+
+    Image coordinates grow downward. The footpoint is therefore the relevant
+    vertical reference; a trajectory near the torso or head cannot count as a
+    ground interception even when its 2D distance happens to be small.
+    """
+
+    height = max(entity.box[3] - entity.box[1], 1.0)
+    vertical_gap = abs(float(ball.center[1]) - float(entity.footpoint[1]))
+    return vertical_gap <= maximum_height_ratio * height
 
 
 def _entity_key(entity: TimelineEntity | None) -> tuple[int | None, int] | None:

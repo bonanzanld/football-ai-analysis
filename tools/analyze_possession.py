@@ -15,7 +15,12 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from football_ai.analysis.entity_timeline import load_entity_timeline
-from football_ai.analysis.possession import PossessionState, PossessionTracker, save_possession_report
+from football_ai.analysis.possession import (
+    PossessionState,
+    PossessionTracker,
+    save_possession_report,
+    should_render_inferred_ball,
+)
 from football_ai.detection.ball_tracking import BallObservation
 
 
@@ -70,7 +75,7 @@ def main() -> None:
     raw_path = output_dir / f"{prefix}_possession_qa_raw.mp4"
     output_path = output_dir / f"{prefix}_possession_qa.mp4"
     save_possession_report(report_path, timeline.source_video, timeline.fps, observations, tracker.passes)
-    _render(base_video, raw_path, observations, entities_by_frame)
+    _render(base_video, raw_path, observations, entities_by_frame, balls)
     _transcode(raw_path, output_path)
 
     controlled = sum(item.state is PossessionState.CONTROLLED for item in observations)
@@ -84,7 +89,13 @@ def main() -> None:
     print(f"Balbezitrapport: {report_path}")
 
 
-def _render(base_video: Path, raw_path: Path, observations, entities_by_frame) -> None:
+def _render(
+    base_video: Path,
+    raw_path: Path,
+    observations,
+    entities_by_frame,
+    balls,
+) -> None:
     capture = cv2.VideoCapture(str(base_video))
     if not capture.isOpened():
         raise RuntimeError(f"Video kon niet worden geopend: {base_video}")
@@ -117,8 +128,16 @@ def _render(base_video: Path, raw_path: Path, observations, entities_by_frame) -
                 )
                 if owner is not None:
                     point = tuple(int(round(value)) for value in owner.footpoint)
-                    cv2.circle(frame, point, 13, color, 3, cv2.LINE_AA)
-                    if observation.state is PossessionState.INFERRED:
+                    draw_inferred_ball = should_render_inferred_ball(
+                        observation,
+                        balls.get(frame_number),
+                    )
+                    if (
+                        observation.state is PossessionState.CONTROLLED
+                        or draw_inferred_ball
+                    ):
+                        cv2.circle(frame, point, 13, color, 3, cv2.LINE_AA)
+                    if draw_inferred_ball:
                         cv2.circle(frame, point, 9, (0, 0, 0), 3, cv2.LINE_AA)
                         cv2.circle(frame, point, 9, (0, 255, 255), 2, cv2.LINE_AA)
                         cv2.putText(

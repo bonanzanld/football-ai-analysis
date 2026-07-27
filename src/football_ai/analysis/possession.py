@@ -154,6 +154,22 @@ class PossessionTracker:
         return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
 
 
+def should_render_inferred_ball(
+    possession: PossessionObservation,
+    ball: BallObservation | None,
+    reliable_ball_confidence: float = 0.15,
+) -> bool:
+    """Show a guessed ball marker only when no reliable real ball is visible."""
+
+    if possession.state is not PossessionState.INFERRED:
+        return False
+    if ball is None:
+        return True
+    if ball.source != "detected":
+        return True
+    return float(ball.confidence) < reliable_ball_confidence
+
+
 def _nearest_candidate(
     ball: BallObservation | None,
     entities: list[TimelineEntity],

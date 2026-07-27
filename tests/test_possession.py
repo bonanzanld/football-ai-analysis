@@ -8,6 +8,7 @@ from football_ai.analysis.possession import (
     PossessionState,
     PossessionTracker,
     build_possession_statistics,
+    should_render_inferred_ball,
 )
 from football_ai.detection.ball_tracking import BallObservation
 from football_ai.tracking.entity_corrections import EntityRole, TeamAssignment
@@ -95,6 +96,25 @@ class PossessionTests(unittest.TestCase):
         self.assertAlmostEqual(
             statistics["players"]["7"]["total_possession_seconds"],
             1.5,
+        )
+
+    def test_reliable_detected_ball_suppresses_inferred_ball_marker(self) -> None:
+        possession = PossessionObservation(
+            5, PossessionState.INFERRED, 7, 12, "Speler 7", "team_a", 0.6
+        )
+
+        self.assertFalse(
+            should_render_inferred_ball(possession, ball(5, 300, confidence=0.84))
+        )
+
+    def test_missing_or_weak_ball_allows_inferred_ball_marker(self) -> None:
+        possession = PossessionObservation(
+            5, PossessionState.INFERRED, 7, 12, "Speler 7", "team_a", 0.6
+        )
+
+        self.assertTrue(should_render_inferred_ball(possession, None))
+        self.assertTrue(
+            should_render_inferred_ball(possession, ball(5, 300, confidence=0.06))
         )
 
 

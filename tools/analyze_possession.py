@@ -74,7 +74,14 @@ def main() -> None:
     report_path = output_dir / f"{prefix}_possession.json"
     raw_path = output_dir / f"{prefix}_possession_qa_raw.mp4"
     output_path = output_dir / f"{prefix}_possession_qa.mp4"
-    save_possession_report(report_path, timeline.source_video, timeline.fps, observations, tracker.passes)
+    save_possession_report(
+        report_path,
+        timeline.source_video,
+        timeline.fps,
+        observations,
+        tracker.passes,
+        tracker.turnovers,
+    )
     _render(base_video, raw_path, observations, entities_by_frame, balls)
     _transcode(raw_path, output_path)
 
@@ -85,6 +92,7 @@ def main() -> None:
     print(f"Vermoedelijk behouden bezit: {inferred}/{len(observations)} frames")
     print(f"Duel/onzeker bezit: {contested}/{len(observations)} frames")
     print(f"Voorlopige passkandidaten: {len(tracker.passes)}")
+    print(f"Bevestigd balverlies: {len(tracker.turnovers)}")
     print(f"QA-video: {output_path}")
     print(f"Balbezitrapport: {report_path}")
 

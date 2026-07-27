@@ -49,6 +49,42 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(tracker.passes[0].from_label, "Speler 1")
         self.assertEqual(tracker.passes[0].to_label, "Speler 2")
 
+    def test_confirmed_low_confidence_arrival_still_creates_pass(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        first = entity(1, TeamAssignment.TEAM_A, 100)
+        second = entity(2, TeamAssignment.TEAM_A, 200)
+        tracker.update(0, ball(0, 100), [first])
+        tracker.update(1, ball(1, 100), [first])
+        tracker.update(2, ball(2, 198, confidence=0.15), [second])
+        tracker.update(3, ball(3, 198, confidence=0.15), [second])
+
+        self.assertEqual(len(tracker.passes), 1)
+
+    def test_confirmed_opponent_arrival_creates_turnover(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        first = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 200)
+        tracker.update(0, ball(0, 100), [first])
+        tracker.update(1, ball(1, 100), [first])
+        tracker.update(2, ball(2, 200), [opponent])
+        tracker.update(3, ball(3, 200), [opponent])
+
+        self.assertEqual(len(tracker.turnovers), 1)
+        self.assertEqual(tracker.turnovers[0].from_team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(tracker.turnovers[0].to_team, TeamAssignment.TEAM_B.value)
+
+    def test_interpolated_ball_can_confirm_possession_near_footpoint(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        player = entity(1, TeamAssignment.TEAM_A, 100)
+        interpolated = BallObservation(
+            0, (100, 100), (97, 97, 103, 103), 0.4, "interpolated"
+        )
+
+        tracker.update(0, interpolated, [player])
+        result = tracker.update(1, interpolated, [player])
+
+        self.assertEqual(result.state, PossessionState.CONTROLLED)
+
     def test_keeps_same_owner_when_ball_temporarily_disappears(self) -> None:
         tracker = PossessionTracker(confirmation_frames=2)
         player = entity(1, TeamAssignment.TEAM_A, 100)

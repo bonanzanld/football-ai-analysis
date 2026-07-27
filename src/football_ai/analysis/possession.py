@@ -56,11 +56,27 @@ class PassEvent:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class TurnoverEvent:
+    start_frame: int
+    end_frame: int
+    from_identity_id: int | None
+    to_identity_id: int | None
+    from_label: str
+    to_label: str
+    from_team: str
+    to_team: str
+    confidence: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 class PossessionTracker:
     def __init__(
         self,
         confirmation_frames: int = 3,
-        minimum_pass_confidence: float = 0.35,
+        minimum_pass_confidence: float = 0.0,
         inferred_confidence_decay: float = 0.985,
         minimum_inferred_confidence: float = 0.12,
     ) -> None:
@@ -76,6 +92,7 @@ class PossessionTracker:
         self._missing = 0
         self._last_change_frame: int | None = None
         self.passes: list[PassEvent] = []
+        self.turnovers: list[TurnoverEvent] = []
 
     def update(
         self,
@@ -135,22 +152,39 @@ class PossessionTracker:
         if (
             previous is not None
             and self._owner is not None
-            and previous.team == self._owner.team
             and _entity_key(previous) != _entity_key(self._owner)
-            and confidence >= self.minimum_pass_confidence
         ):
-            self.passes.append(
-                PassEvent(
-                    start_frame=previous_change if previous_change is not None else frame_number,
-                    end_frame=frame_number,
-                    from_identity_id=previous.identity_id,
-                    to_identity_id=self._owner.identity_id,
-                    from_label=previous.label,
-                    to_label=self._owner.label,
-                    team=self._owner.team.value,
-                    confidence=confidence,
+            start_frame = previous_change if previous_change is not None else frame_number
+            if (
+                previous.team == self._owner.team
+                and confidence >= self.minimum_pass_confidence
+            ):
+                self.passes.append(
+                    PassEvent(
+                        start_frame=start_frame,
+                        end_frame=frame_number,
+                        from_identity_id=previous.identity_id,
+                        to_identity_id=self._owner.identity_id,
+                        from_label=previous.label,
+                        to_label=self._owner.label,
+                        team=self._owner.team.value,
+                        confidence=confidence,
+                    )
                 )
-            )
+            elif previous.team != self._owner.team:
+                self.turnovers.append(
+                    TurnoverEvent(
+                        start_frame=start_frame,
+                        end_frame=frame_number,
+                        from_identity_id=previous.identity_id,
+                        to_identity_id=self._owner.identity_id,
+                        from_label=previous.label,
+                        to_label=self._owner.label,
+                        from_team=previous.team.value,
+                        to_team=self._owner.team.value,
+                        confidence=confidence,
+                    )
+                )
         return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
 
 
@@ -174,7 +208,9 @@ def _nearest_candidate(
     ball: BallObservation | None,
     entities: list[TimelineEntity],
 ) -> tuple[TimelineEntity | None, PossessionState, float]:
-    if ball is None or ball.source != "detected":
+    if ball is None or ball.source not in {"detected", "interpolated", "predicted"}:
+        return None, PossessionState.UNKNOWN, 0.0
+    if ball.source == "predicted" and ball.confidence < 0.15:
         return None, PossessionState.UNKNOWN, 0.0
     candidates = []
     ball_point = np.asarray(ball.center, dtype=np.float64)
@@ -220,6 +256,7 @@ def save_possession_report(
     fps: float,
     observations: list[PossessionObservation],
     passes: list[PassEvent],
+    turnovers: list[TurnoverEvent] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -229,6 +266,7 @@ def save_possession_report(
         "statistics": build_possession_statistics(observations, fps),
         "observations": [item.to_dict() for item in observations],
         "passes": [item.to_dict() for item in passes],
+        "turnovers": [item.to_dict() for item in (turnovers or [])],
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
 

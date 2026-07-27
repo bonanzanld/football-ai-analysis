@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -76,11 +77,30 @@ class PossessionTracker:
     def __init__(
         self,
         confirmation_frames: int = 3,
+        opponent_confirmation_frames: int = 12,
+        teammate_control_radius: float = 0.85,
+        opponent_control_radius: float = 0.45,
+        dwell_control_frames: int = 6,
+        motion_evidence_memory_frames: int = 6,
+        low_speed_threshold: float = 4.0,
+        deceleration_ratio: float = 0.55,
+        direction_change_degrees: float = 35.0,
         minimum_pass_confidence: float = 0.0,
         inferred_confidence_decay: float = 0.985,
         minimum_inferred_confidence: float = 0.12,
     ) -> None:
         self.confirmation_frames = confirmation_frames
+        self.opponent_confirmation_frames = max(
+            confirmation_frames,
+            opponent_confirmation_frames,
+        )
+        self.teammate_control_radius = teammate_control_radius
+        self.opponent_control_radius = opponent_control_radius
+        self.dwell_control_frames = max(confirmation_frames, dwell_control_frames)
+        self.motion_evidence_memory_frames = motion_evidence_memory_frames
+        self.low_speed_threshold = low_speed_threshold
+        self.deceleration_ratio = deceleration_ratio
+        self.direction_change_degrees = direction_change_degrees
         self.minimum_pass_confidence = minimum_pass_confidence
         self.inferred_confidence_decay = inferred_confidence_decay
         self.minimum_inferred_confidence = minimum_inferred_confidence
@@ -89,8 +109,11 @@ class PossessionTracker:
         self._candidate_key: tuple[int | None, int] | None = None
         self._candidate: TimelineEntity | None = None
         self._candidate_count = 0
+        self._candidate_has_motion_evidence = False
         self._missing = 0
         self._last_change_frame: int | None = None
+        self._ball_centers: list[np.ndarray] = []
+        self._motion_evidence_age: int | None = None
         self.passes: list[PassEvent] = []
         self.turnovers: list[TurnoverEvent] = []
 
@@ -100,13 +123,33 @@ class PossessionTracker:
         ball: BallObservation | None,
         entities: list[TimelineEntity],
     ) -> PossessionObservation:
-        candidate, state, confidence = _nearest_candidate(ball, entities)
+        self._update_ball_motion(ball)
+        candidate, state, confidence, normalized_distance = _nearest_candidate(
+            ball,
+            entities,
+        )
         key = _entity_key(candidate)
+        if (
+            candidate is not None
+            and self._owner is not None
+            and key != self._owner_key
+        ):
+            allowed_radius = (
+                self.teammate_control_radius
+                if candidate.team == self._owner.team
+                else self.opponent_control_radius
+            )
+            if normalized_distance > allowed_radius:
+                candidate = None
+                key = None
+                state = PossessionState.LOOSE
+                confidence = 0.0
         if candidate is None or state is not PossessionState.CONTROLLED:
             self._missing += 1
             self._candidate_key = None
             self._candidate = None
             self._candidate_count = 0
+            self._candidate_has_motion_evidence = False
             if self._owner is not None:
                 inferred_confidence = max(
                     self.minimum_inferred_confidence,
@@ -124,14 +167,28 @@ class PossessionTracker:
         if key == self._owner_key:
             self._candidate_key = None
             self._candidate_count = 0
+            self._candidate_has_motion_evidence = False
             return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
         if key != self._candidate_key:
             self._candidate_key = key
             self._candidate = candidate
             self._candidate_count = 1
+            self._candidate_has_motion_evidence = self._has_recent_motion_evidence()
         else:
             self._candidate_count += 1
-        if self._candidate_count < self.confirmation_frames:
+            self._candidate_has_motion_evidence |= self._has_recent_motion_evidence()
+        required_frames = self.confirmation_frames
+        if (
+            self._owner is not None
+            and self._candidate is not None
+            and self._candidate.team != self._owner.team
+        ):
+            required_frames = self.opponent_confirmation_frames
+        has_control_evidence = (
+            self._candidate_has_motion_evidence
+            or self._candidate_count >= self.dwell_control_frames
+        )
+        if self._candidate_count < required_frames or not has_control_evidence:
             if self._owner is not None:
                 return _observation(
                     frame_number,
@@ -148,6 +205,7 @@ class PossessionTracker:
         self._candidate = None
         self._candidate_key = None
         self._candidate_count = 0
+        self._candidate_has_motion_evidence = False
         self._last_change_frame = frame_number
         if (
             previous is not None
@@ -187,6 +245,43 @@ class PossessionTracker:
                 )
         return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
 
+    def _update_ball_motion(self, ball: BallObservation | None) -> None:
+        if self._motion_evidence_age is not None:
+            self._motion_evidence_age += 1
+            if self._motion_evidence_age > self.motion_evidence_memory_frames:
+                self._motion_evidence_age = None
+        if ball is None or ball.source not in {"detected", "interpolated", "predicted"}:
+            return
+
+        self._ball_centers.append(np.asarray(ball.center, dtype=np.float64))
+        self._ball_centers = self._ball_centers[-3:]
+        if len(self._ball_centers) < 2:
+            return
+
+        current_vector = self._ball_centers[-1] - self._ball_centers[-2]
+        current_speed = float(np.linalg.norm(current_vector))
+        low_speed = current_speed <= self.low_speed_threshold
+        strong_deceleration = False
+        sharp_turn = False
+        if len(self._ball_centers) == 3:
+            previous_vector = self._ball_centers[-2] - self._ball_centers[-3]
+            previous_speed = float(np.linalg.norm(previous_vector))
+            strong_deceleration = (
+                previous_speed >= self.low_speed_threshold
+                and current_speed <= previous_speed * self.deceleration_ratio
+            )
+            if previous_speed >= 2.0 and current_speed >= 2.0:
+                cosine = float(np.dot(previous_vector, current_vector)) / (
+                    previous_speed * current_speed
+                )
+                angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+                sharp_turn = angle >= self.direction_change_degrees
+        if low_speed or strong_deceleration or sharp_turn:
+            self._motion_evidence_age = 0
+
+    def _has_recent_motion_evidence(self) -> bool:
+        return self._motion_evidence_age is not None
+
 
 def should_render_inferred_ball(
     possession: PossessionObservation,
@@ -207,11 +302,11 @@ def should_render_inferred_ball(
 def _nearest_candidate(
     ball: BallObservation | None,
     entities: list[TimelineEntity],
-) -> tuple[TimelineEntity | None, PossessionState, float]:
+) -> tuple[TimelineEntity | None, PossessionState, float, float]:
     if ball is None or ball.source not in {"detected", "interpolated", "predicted"}:
-        return None, PossessionState.UNKNOWN, 0.0
+        return None, PossessionState.UNKNOWN, 0.0, float("inf")
     if ball.source == "predicted" and ball.confidence < 0.15:
-        return None, PossessionState.UNKNOWN, 0.0
+        return None, PossessionState.UNKNOWN, 0.0, float("inf")
     candidates = []
     ball_point = np.asarray(ball.center, dtype=np.float64)
     for entity in entities:
@@ -221,15 +316,15 @@ def _nearest_candidate(
         if normalized <= 1.0:
             candidates.append((normalized, entity))
     if not candidates:
-        return None, PossessionState.LOOSE, 0.0
+        return None, PossessionState.LOOSE, 0.0, float("inf")
     candidates.sort(key=lambda item: item[0])
     best_distance, best = candidates[0]
     confidence = max(0.0, 1.0 - best_distance) * float(ball.confidence)
     if len(candidates) > 1:
         second_distance, second = candidates[1]
         if second.team != best.team and second_distance - best_distance < 0.22:
-            return None, PossessionState.CONTESTED, confidence
-    return best, PossessionState.CONTROLLED, confidence
+            return None, PossessionState.CONTESTED, confidence, best_distance
+    return best, PossessionState.CONTROLLED, confidence, best_distance
 
 
 def _entity_key(entity: TimelineEntity | None) -> tuple[int | None, int] | None:

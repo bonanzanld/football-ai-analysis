@@ -61,7 +61,10 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(len(tracker.passes), 1)
 
     def test_confirmed_opponent_arrival_creates_turnover(self) -> None:
-        tracker = PossessionTracker(confirmation_frames=2)
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=2,
+        )
         first = entity(1, TeamAssignment.TEAM_A, 100)
         opponent = entity(2, TeamAssignment.TEAM_B, 200)
         tracker.update(0, ball(0, 100), [first])
@@ -98,7 +101,10 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(result.team, TeamAssignment.TEAM_A.value)
 
     def test_opponent_must_be_confirmed_before_possession_changes(self) -> None:
-        tracker = PossessionTracker(confirmation_frames=2)
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=2,
+        )
         first = entity(1, TeamAssignment.TEAM_A, 100)
         opponent = entity(2, TeamAssignment.TEAM_B, 200)
         tracker.update(0, ball(0, 100), [first])
@@ -111,6 +117,78 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(pending.team, TeamAssignment.TEAM_A.value)
         self.assertEqual(changed.state, PossessionState.CONTROLLED)
         self.assertEqual(changed.team, TeamAssignment.TEAM_B.value)
+
+    def test_opponent_flyby_does_not_break_teammate_pass(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=6,
+        )
+        passer = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 200)
+        receiver = entity(3, TeamAssignment.TEAM_A, 300)
+        tracker.update(0, ball(0, 100), [passer])
+        tracker.update(1, ball(1, 100), [passer])
+        for frame in range(2, 6):
+            tracker.update(frame, ball(frame, 200), [opponent])
+        tracker.update(6, ball(6, 300), [receiver])
+        tracker.update(7, ball(7, 300), [receiver])
+
+        self.assertEqual(len(tracker.turnovers), 0)
+        self.assertEqual(len(tracker.passes), 1)
+        self.assertEqual(tracker.passes[0].from_label, "Speler 1")
+        self.assertEqual(tracker.passes[0].to_label, "Speler 3")
+
+    def test_opponent_must_be_closer_than_teammate_receiver(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            opponent_confirmation_frames=2,
+            opponent_control_radius=0.45,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 200)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        # 25 px is binnen de oude algemene zone, maar niet overtuigend genoeg
+        # voor een tegenstander die werkelijk de bal overneemt.
+        pending = tracker.update(2, ball(2, 225), [opponent])
+        pending = tracker.update(3, ball(3, 225), [opponent])
+
+        self.assertEqual(pending.state, PossessionState.INFERRED)
+        self.assertEqual(pending.team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(len(tracker.turnovers), 0)
+
+    def test_fast_flyby_does_not_create_possession_without_control_evidence(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            dwell_control_frames=6,
+            low_speed_threshold=2.0,
+        )
+        player = entity(1, TeamAssignment.TEAM_A, 100)
+
+        for frame, x in enumerate((40, 60, 80, 100, 120)):
+            result = tracker.update(frame, ball(frame, x), [player])
+
+        self.assertNotEqual(result.state, PossessionState.CONTROLLED)
+        self.assertIsNone(result.identity_id)
+
+    def test_direction_change_confirms_one_touch_control(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            dwell_control_frames=8,
+            low_speed_threshold=1.0,
+            direction_change_degrees=30.0,
+        )
+        player = entity(1, TeamAssignment.TEAM_A, 100)
+
+        tracker.update(0, ball(0, 60), [])
+        tracker.update(1, ball(1, 85), [player])
+        result = tracker.update(2, ball(2, 100), [player])
+        self.assertNotEqual(result.state, PossessionState.CONTROLLED)
+        tracker.update(3, ball(3, 88), [player])
+        result = tracker.update(4, ball(4, 76), [player])
+
+        self.assertEqual(result.state, PossessionState.CONTROLLED)
+        self.assertEqual(result.identity_id, player.identity_id)
 
     def test_inferred_possession_counts_for_team_and_player_statistics(self) -> None:
         observations = [

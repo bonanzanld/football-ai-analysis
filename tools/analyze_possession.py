@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 from pathlib import Path
 import subprocess
@@ -82,7 +83,15 @@ def main() -> None:
         tracker.passes,
         tracker.turnovers,
     )
-    _render(base_video, raw_path, observations, entities_by_frame, balls)
+    _render(
+        base_video,
+        raw_path,
+        observations,
+        entities_by_frame,
+        balls,
+        tracker.passes,
+        tracker.turnovers,
+    )
     _transcode(raw_path, output_path)
 
     controlled = sum(item.state is PossessionState.CONTROLLED for item in observations)
@@ -103,6 +112,8 @@ def _render(
     observations,
     entities_by_frame,
     balls,
+    passes,
+    turnovers,
 ) -> None:
     capture = cv2.VideoCapture(str(base_video))
     if not capture.isOpened():
@@ -110,6 +121,14 @@ def _render(
     fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     writer = None
     frame_number = 0
+    team_names = _team_names(observations)
+    team_frames = {team: 0 for team in team_names}
+    pass_counts = {team: 0 for team in team_names}
+    loss_counts = {team: 0 for team in team_names}
+    passes_at = {item.end_frame: item for item in passes}
+    turnovers_at = {item.end_frame: item for item in turnovers}
+    recent_events: deque[tuple[int, str, tuple[int, int, int]]] = deque(maxlen=5)
+    active_event: tuple[int, str, tuple[int, int, int]] | None = None
     try:
         while frame_number < len(observations):
             success, frame = capture.read()
@@ -158,14 +177,140 @@ def _render(
                             2,
                             cv2.LINE_AA,
                         )
+            if observation.team in team_frames and observation.state in {
+                PossessionState.CONTROLLED,
+                PossessionState.INFERRED,
+            }:
+                team_frames[observation.team] += 1
+            if frame_number in passes_at:
+                event = passes_at[frame_number]
+                pass_counts[event.team] = pass_counts.get(event.team, 0) + 1
+                text = f"PASS: {_short_name(event.from_label)} > {_short_name(event.to_label)}"
+                active_event = (frame_number, text, (0, 220, 0))
+                recent_events.appendleft(active_event)
+            if frame_number in turnovers_at:
+                event = turnovers_at[frame_number]
+                loss_counts[event.from_team] = loss_counts.get(event.from_team, 0) + 1
+                text = f"BALVERLIES: {_short_name(event.from_label)}"
+                active_event = (frame_number, text, (0, 90, 255))
+                recent_events.appendleft(active_event)
+            panel_width = max(390, int(round(frame.shape[1] * 0.30)))
+            canvas = cv2.copyMakeBorder(
+                frame,
+                0,
+                0,
+                0,
+                panel_width,
+                cv2.BORDER_CONSTANT,
+                value=(20, 35, 20),
+            )
+            _draw_dashboard(
+                canvas,
+                frame.shape[1],
+                panel_width,
+                frame_number,
+                fps,
+                observation,
+                team_names,
+                team_frames,
+                pass_counts,
+                loss_counts,
+                active_event,
+                recent_events,
+            )
             if writer is None:
-                writer = cv2.VideoWriter(str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame.shape[1], frame.shape[0]))
-            writer.write(frame)
+                writer = cv2.VideoWriter(
+                    str(raw_path),
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps,
+                    (canvas.shape[1], canvas.shape[0]),
+                )
+            writer.write(canvas)
             frame_number += 1
     finally:
         capture.release()
         if writer is not None:
             writer.release()
+
+
+def _team_names(observations) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for item in observations:
+        if item.team is None or item.label is None or item.team in names:
+            continue
+        club = item.label.split(" - ", 1)[0].strip()
+        names[item.team] = club or item.team
+    return names
+
+
+def _short_name(label: str) -> str:
+    return label.split(" - ", 1)[-1][:24]
+
+
+def _draw_dashboard(
+    canvas,
+    x0: int,
+    width: int,
+    frame_number: int,
+    fps: float,
+    observation,
+    team_names,
+    team_frames,
+    pass_counts,
+    loss_counts,
+    active_event,
+    recent_events,
+) -> None:
+    cv2.rectangle(canvas, (x0, 0), (x0 + width, canvas.shape[0]), (19, 43, 24), -1)
+    cv2.line(canvas, (x0, 0), (x0, canvas.shape[0]), (70, 100, 70), 2)
+    left = x0 + 22
+    cv2.putText(canvas, "WEDSTRIJDANALYSE", (left, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.76, (255, 255, 255), 2, cv2.LINE_AA)
+    seconds = frame_number / max(fps, 1e-6)
+    cv2.putText(canvas, f"Tijd {int(seconds // 60):02d}:{int(seconds % 60):02d}", (left, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (190, 205, 190), 1, cv2.LINE_AA)
+
+    state_text = {
+        PossessionState.CONTROLLED: "BEVESTIGD BEZIT",
+        PossessionState.INFERRED: "VERMOEDELIJK BEZIT",
+        PossessionState.CONTESTED: "DUEL / ONZEKER",
+        PossessionState.LOOSE: "LOSSE BAL",
+        PossessionState.UNKNOWN: "BAL ONBEKEND",
+    }[observation.state]
+    state_color = (0, 220, 0) if observation.state is PossessionState.CONTROLLED else (0, 210, 255)
+    cv2.putText(canvas, state_text, (left, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.58, state_color, 2, cv2.LINE_AA)
+    owner = _short_name(observation.label) if observation.label else "-"
+    cv2.putText(canvas, owner, (left, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (235, 235, 235), 1, cv2.LINE_AA)
+
+    total = sum(team_frames.values())
+    y = 188
+    team_colors = {
+        "team_a": (255, 130, 20),
+        "team_b": (30, 70, 255),
+    }
+    for team, name in team_names.items():
+        percentage = 100.0 * team_frames.get(team, 0) / total if total else 0.0
+        team_color = team_colors.get(team, (180, 180, 180))
+        cv2.putText(canvas, name[:22], (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, team_color, 2, cv2.LINE_AA)
+        cv2.putText(canvas, f"Bezit {percentage:5.1f}%", (left, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (240, 240, 240), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"Passes {pass_counts.get(team, 0)}   Balverlies {loss_counts.get(team, 0)}", (left, y + 54), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (205, 215, 205), 1, cv2.LINE_AA)
+        y += 92
+
+    cv2.line(canvas, (left, y), (x0 + width - 22, y), (70, 100, 70), 1)
+    y += 32
+    if active_event is not None and frame_number - active_event[0] <= int(round(fps * 2.5)):
+        _, event_text, event_color = active_event
+        cv2.rectangle(canvas, (left - 8, y - 24), (x0 + width - 18, y + 20), (30, 55, 30), -1)
+        cv2.putText(canvas, event_text[:38], (left, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.52, event_color, 2, cv2.LINE_AA)
+        y += 62
+
+    cv2.putText(canvas, "RECENTE GEBEURTENISSEN", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 220, 210), 1, cv2.LINE_AA)
+    y += 28
+    for event_frame, event_text, event_color in recent_events:
+        event_seconds = event_frame / max(fps, 1e-6)
+        stamp = f"{int(event_seconds // 60):02d}:{int(event_seconds % 60):02d}"
+        cv2.putText(canvas, f"{stamp}  {event_text[:31]}", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.43, event_color, 1, cv2.LINE_AA)
+        y += 24
+
+    cv2.putText(canvas, "Bezit omvat bevestigd + vermoedelijk", (left, canvas.shape[0] - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (155, 175, 155), 1, cv2.LINE_AA)
 
 
 def _transcode(raw_path: Path, output_path: Path) -> None:

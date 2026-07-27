@@ -37,6 +37,7 @@ def main() -> None:
     segmentation_path = output_dir / f"{video_path.stem}_track_segments.json"
     default_corrections_path = output_dir / f"{video_path.stem}_entity_corrections.json"
     identities_path = output_dir / f"{video_path.stem}_entity_identities.json"
+    timeline_path = output_dir / f"{video_path.stem}_entity_timeline.json"
     corrections_path = args.corrections or (
         default_corrections_path if default_corrections_path.exists() else None
     )
@@ -65,6 +66,7 @@ def main() -> None:
         max_seconds=args.seconds,
         review_manifest_path=manifest_path,
         segmentation_path=segmentation_path,
+        entity_timeline_path=timeline_path,
         stable_team_render=True,
     )
 
@@ -72,6 +74,7 @@ def main() -> None:
     print(f"QA-video: {output_path}")
     print(f"Reviewbestand: {manifest_path}")
     print(f"Tracksegmenten: {segmentation_path}")
+    print(f"Entiteitentijdlijn: {timeline_path}")
 
 
 if __name__ == "__main__":

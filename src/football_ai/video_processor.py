@@ -36,6 +36,7 @@ from football_ai.tracking.entity_review_manifest import (
     save_entity_review_manifest,
 )
 from football_ai.visualizer import draw_resolved_track_boxes, draw_tracked_players
+from football_ai.analysis.entity_timeline import build_entity_timeline, save_entity_timeline
 
 
 class VideoProcessor:
@@ -91,6 +92,7 @@ class VideoProcessor:
         max_seconds: float | None = None,
         review_manifest_path: Path | None = None,
         segmentation_path: Path | None = None,
+        entity_timeline_path: Path | None = None,
         stable_team_render: bool = False,
     ) -> int:
         if not video_path.exists():
@@ -312,6 +314,23 @@ class VideoProcessor:
             )
             save_entity_review_manifest(manifest, review_manifest_path)
             print(f"Entity-reviewbestand: {review_manifest_path}")
+
+        if entity_timeline_path is not None:
+            timeline = build_entity_timeline(
+                source_video=str(video_path),
+                fps=fps,
+                tracks=track_engine.tracks,
+                segmentations=segmentations,
+                resolver=self.entity_resolver,
+                identities=self.entity_identities,
+                final_teams={
+                    track_id: result.team_id
+                    for track_id, result in consensus_results.items()
+                    if result.team_id is not None
+                },
+            )
+            save_entity_timeline(timeline, entity_timeline_path)
+            print(f"Entiteitentijdlijn: {entity_timeline_path}")
 
         return frame_number
 

@@ -122,7 +122,7 @@ def segment_track_by_team_switches(
     evidence: list[TeamEvidence],
     initial_team_id: int | None,
     minimum_confidence: float = 0.12,
-    confirmation_observations: int = 5,
+    confirmation_observations: int = 12,
 ) -> TrackSegmentation:
     """Split a technical track only after a sustained team-colour change.
 

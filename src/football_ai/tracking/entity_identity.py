@@ -301,8 +301,18 @@ def _score_link(
     earliest = min(second.observations, key=lambda item: item.frame_number)
     center_a, height_a = _box_geometry(last)
     center_b, height_b = _box_geometry(earliest)
-    distance = float(np.linalg.norm(center_a - center_b))
     body_scale = max(12.0, (height_a + height_b) / 2.0)
+    direct_distance = float(np.linalg.norm(center_a - center_b))
+    predicted_center = _predict_track_center(first, earliest.frame_number, body_scale)
+    predicted_distance = (
+        float(np.linalg.norm(predicted_center - center_b))
+        if predicted_center is not None
+        else direct_distance
+    )
+    # Een speler die kort achter iemand verdwijnt, hoort terug te verschijnen
+    # nabij de voortzetting van zijn looprichting. De directe positie blijft als
+    # veilige fallback beschikbaar voor stilstaande of draaiende spelers.
+    distance = min(direct_distance, predicted_distance)
     normalized_distance = distance / body_scale
     position_score = max(0.0, 1.0 - normalized_distance / 4.0)
     size_score = min(height_a, height_b) / max(height_a, height_b, 1.0)
@@ -322,6 +332,30 @@ def _score_link(
         round(appearance, 4),
         decision,
     )
+
+
+def _predict_track_center(
+    track: ReviewTrack,
+    target_frame: int,
+    body_scale: float,
+) -> np.ndarray | None:
+    observations = sorted(track.observations, key=lambda item: item.frame_number)
+    if len(observations) < 2:
+        return None
+    previous, last = observations[-2:]
+    frame_delta = last.frame_number - previous.frame_number
+    target_delta = target_frame - last.frame_number
+    if frame_delta <= 0 or target_delta <= 0:
+        return None
+    previous_center, _ = _box_geometry(previous)
+    last_center, _ = _box_geometry(last)
+    velocity = (last_center - previous_center) / frame_delta
+    displacement = velocity * target_delta
+    maximum_displacement = max(12.0, 3.0 * body_scale)
+    length = float(np.linalg.norm(displacement))
+    if length > maximum_displacement:
+        displacement *= maximum_displacement / length
+    return last_center + displacement
 
 
 def _track_descriptor(capture: cv2.VideoCapture, track: ReviewTrack) -> np.ndarray | None:

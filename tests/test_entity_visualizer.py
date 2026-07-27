@@ -19,7 +19,7 @@ class EntityVisualizerTests(unittest.TestCase):
 
         color, label = _entity_style(entity)
 
-        self.assertEqual(color, (0, 0, 255))
+        self.assertEqual(color, (255, 0, 255))
         self.assertEqual(label, "Keeper B")
 
     def test_unknown_person_has_neutral_label(self) -> None:

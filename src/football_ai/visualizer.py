@@ -18,6 +18,7 @@ TEAM_COLORS: dict[int, tuple[int, int, int]] = {
 }
 
 UNKNOWN_COLOR = (0, 255, 255)
+GOALKEEPER_COLOR = (255, 0, 255)
 FOOTPOINT_COLOR = (0, 255, 0)
 FOOTPOINT_OUTLINE_COLOR = (0, 64, 0)
 BALL_COLOR = (0, 255, 255)
@@ -195,7 +196,11 @@ def _entity_style(entity: ResolvedEntity) -> tuple[tuple[int, int, int], str]:
         TeamAssignment.TEAM_A: TEAM_COLORS[0],
         TeamAssignment.TEAM_B: TEAM_COLORS[1],
     }
-    color = team_colors.get(entity.team, UNKNOWN_COLOR)
+    color = (
+        GOALKEEPER_COLOR
+        if entity.role is EntityRole.GOALKEEPER
+        else team_colors.get(entity.team, UNKNOWN_COLOR)
+    )
 
     role_labels = {
         EntityRole.PLAYER: "Speler",

@@ -3,7 +3,16 @@ import unittest
 import numpy as np
 
 from football_ai.detection.ball_tracking import BallObservation
-from football_ai.visualizer import FOOTPOINT_COLOR, draw_ball_observation, draw_footpoint
+from football_ai.tracking.entity_corrections import EntityRole, TeamAssignment
+from football_ai.tracking.entity_resolver import EntityDecisionSource, ResolvedEntity
+from football_ai.visualizer import (
+    FOOTPOINT_COLOR,
+    GOALKEEPER_COLOR,
+    TEAM_COLORS,
+    _entity_style,
+    draw_ball_observation,
+    draw_footpoint,
+)
 
 
 class FootpointVisualizerTests(unittest.TestCase):
@@ -44,6 +53,37 @@ class FootpointVisualizerTests(unittest.TestCase):
         )
         rendered = draw_ball_observation(frame, observation)
         self.assertTrue(np.array_equal(rendered, frame))
+
+
+class EntityStyleTests(unittest.TestCase):
+    def test_goalkeeper_uses_distinct_color_but_retains_team_label(self) -> None:
+        entity = ResolvedEntity(
+            track_id=7,
+            role=EntityRole.GOALKEEPER,
+            team=TeamAssignment.TEAM_B,
+            excluded=False,
+            source=EntityDecisionSource.MANUAL,
+        )
+
+        color, label = _entity_style(entity)
+
+        self.assertTupleEqual(color, GOALKEEPER_COLOR)
+        self.assertNotIn(color, TEAM_COLORS.values())
+        self.assertEqual(label, "Keeper B")
+
+    def test_player_keeps_team_color(self) -> None:
+        entity = ResolvedEntity(
+            track_id=8,
+            role=EntityRole.PLAYER,
+            team=TeamAssignment.TEAM_A,
+            excluded=False,
+            source=EntityDecisionSource.MANUAL,
+        )
+
+        color, label = _entity_style(entity)
+
+        self.assertTupleEqual(color, TEAM_COLORS[0])
+        self.assertEqual(label, "Speler A")
 
 
 if __name__ == "__main__":

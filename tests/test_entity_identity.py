@@ -6,6 +6,7 @@ from football_ai.tracking.entity_corrections import EntityRole, TeamAssignment
 from football_ai.tracking.entity_identity import (
     EntityIdentitySet,
     PhysicalIdentity,
+    _predict_track_center,
     grouped_review_tracks,
 )
 from football_ai.tracking.entity_review_manifest import (
@@ -76,6 +77,19 @@ class EntityIdentityTests(unittest.TestCase):
         self.assertEqual(len(grouped), 1)
         self.assertEqual(grouped[0].frames_seen, 18)
         self.assertEqual(len(grouped[0].observations), 4)
+
+    def test_predicts_reappearance_in_same_movement_direction(self) -> None:
+        source = track(4, 10, 20)
+
+        predicted = _predict_track_center(
+            source,
+            target_frame=30,
+            body_scale=60.0,
+        )
+
+        self.assertIsNotNone(predicted)
+        self.assertAlmostEqual(float(predicted[0]), 40.0)
+        self.assertAlmostEqual(float(predicted[1]), 50.0)
 
 
 if __name__ == "__main__":

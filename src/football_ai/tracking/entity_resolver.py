@@ -47,6 +47,7 @@ class EntityResolver:
         self,
         track_id: int,
         automatic_team_id: int | None,
+        automatic_role: EntityRole = EntityRole.PLAYER,
         prefer_current_team: bool = False,
         segment_index: int | None = None,
     ) -> ResolvedEntity:
@@ -56,21 +57,12 @@ class EntityResolver:
             else None
         )
         if correction is not None:
-            team = correction.team
-            source = EntityDecisionSource.MANUAL
-            if prefer_current_team and automatic_team_id in (0, 1):
-                team = (
-                    TeamAssignment.TEAM_A
-                    if automatic_team_id == 0
-                    else TeamAssignment.TEAM_B
-                )
-                source = EntityDecisionSource.AUTOMATIC
             return ResolvedEntity(
                 track_id=track_id,
                 role=correction.role,
-                team=team,
+                team=correction.team,
                 excluded=correction.excluded,
-                source=source,
+                source=EntityDecisionSource.MANUAL,
                 note=correction.note,
             )
 
@@ -86,7 +78,11 @@ class EntityResolver:
 
         return ResolvedEntity(
             track_id=track_id,
-            role=EntityRole.PLAYER,
+            role=(
+                automatic_role
+                if automatic_role in (EntityRole.PLAYER, EntityRole.GOALKEEPER)
+                else EntityRole.PLAYER
+            ),
             team=automatic_team,
             excluded=False,
             source=EntityDecisionSource.AUTOMATIC,

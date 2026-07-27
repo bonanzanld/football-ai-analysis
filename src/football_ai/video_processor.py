@@ -358,6 +358,10 @@ class VideoProcessor:
             for identity in self.entity_identities.identities:
                 for track_id in identity.track_ids:
                     identity_labels[track_id] = identity.label
+        segment_identity_labels = self._build_segment_identity_labels(
+            tracks=tracks,
+            segmentations=segmentations,
+        )
 
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
@@ -389,8 +393,9 @@ class VideoProcessor:
                             segment_index=segment.index,
                         )
                         if len(segmentation.segments) > 1:
-                            current_identity_labels[track_id] = (
-                                f"ID {track_id}.{segment.index}"
+                            current_identity_labels[track_id] = segment_identity_labels.get(
+                                (track_id, segment.index),
+                                f"ID {track_id}.{segment.index}",
                             )
                             identity = (
                                 self.entity_identities.identity_for_track(track_id)
@@ -423,6 +428,13 @@ class VideoProcessor:
                     expected_team = self._identity_team_id(identity)
                     if expected_team is not None and expected_team != current_team:
                         current_identity_labels.pop(track_id, None)
+                current_boxes, current_entities, current_identity_labels = (
+                    self._deduplicate_identity_boxes(
+                        current_boxes,
+                        current_entities,
+                        current_identity_labels,
+                    )
+                )
                 annotated = draw_resolved_track_boxes(
                     frame=frame,
                     boxes_by_tracker_id=current_boxes,
@@ -443,6 +455,133 @@ class VideoProcessor:
         os.replace(temporary_path, output_path)
         print("✅ Tweede videopass met definitieve teamlabels gereed.")
         return segmentations
+
+    @staticmethod
+    def _deduplicate_identity_boxes(
+        boxes: dict[int, tuple[float, float, float, float]],
+        entities: dict[int, Any],
+        labels: dict[int, str],
+    ) -> tuple[
+        dict[int, tuple[float, float, float, float]],
+        dict[int, Any],
+        dict[int, str],
+    ]:
+        """Keep one visible box when two technical tracks represent one player."""
+
+        winner_by_label: dict[str, tuple[int, float]] = {}
+        for track_id, box in boxes.items():
+            label = labels.get(track_id)
+            if label is None:
+                continue
+            x1, y1, x2, y2 = box
+            area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            current = winner_by_label.get(label)
+            if current is None or area > current[1]:
+                winner_by_label[label] = (track_id, area)
+        duplicate_ids = {
+            track_id
+            for track_id, label in labels.items()
+            if label in winner_by_label and winner_by_label[label][0] != track_id
+        }
+        if not duplicate_ids:
+            return boxes, entities, labels
+        return (
+            {key: value for key, value in boxes.items() if key not in duplicate_ids},
+            {key: value for key, value in entities.items() if key not in duplicate_ids},
+            {key: value for key, value in labels.items() if key not in duplicate_ids},
+        )
+
+    def _build_segment_identity_labels(
+        self,
+        tracks: list[Any],
+        segmentations: dict[int, TrackSegmentation],
+    ) -> dict[tuple[int, int], str]:
+        """Reconnect a post-occlusion segment to a recently disappearing player.
+
+        ByteTrack can briefly keep the old box alive while already assigning a
+        second technical ID to the same person. A small overlap is therefore
+        allowed, but only for the same team and a nearby foot position.
+        """
+
+        if self.entity_identities is None:
+            return {}
+        tracks_by_id = {track.track_id: track for track in tracks}
+        labels: dict[tuple[int, int], str] = {}
+        for track_id, segmentation in segmentations.items():
+            target_track = tracks_by_id.get(track_id)
+            if target_track is None:
+                continue
+            for segment in segmentation.segments:
+                if segment.index == 1 or segment.team_id not in (0, 1):
+                    continue
+                target_box = self._box_nearest_frame(
+                    target_track,
+                    segment.first_frame,
+                    prefer_after=True,
+                )
+                if target_box is None:
+                    continue
+                best: tuple[float, str] | None = None
+                for identity in self.entity_identities.identities:
+                    if self._identity_team_id(identity) != segment.team_id:
+                        continue
+                    for candidate_id in identity.track_ids:
+                        if candidate_id == track_id:
+                            continue
+                        candidate = tracks_by_id.get(candidate_id)
+                        if candidate is None:
+                            continue
+                        frame_gap = segment.first_frame - candidate.last_frame
+                        if frame_gap < -20 or frame_gap > 45:
+                            continue
+                        candidate_box = self._box_nearest_frame(
+                            candidate,
+                            segment.first_frame,
+                            prefer_after=False,
+                        )
+                        if candidate_box is None:
+                            continue
+                        score = self._handover_score(
+                            target_box,
+                            candidate_box,
+                            frame_gap,
+                        )
+                        if score <= 1.35 and (best is None or score < best[0]):
+                            best = (score, identity.label)
+                if best is not None:
+                    labels[(track_id, segment.index)] = best[1]
+        return labels
+
+    @staticmethod
+    def _box_nearest_frame(
+        track: Any,
+        frame_number: int,
+        prefer_after: bool,
+    ) -> tuple[float, float, float, float] | None:
+        observations = list(zip(track.observation_frames, track.boxes, strict=True))
+        if not observations:
+            return None
+        preferred = [
+            item for item in observations
+            if (item[0] >= frame_number if prefer_after else item[0] <= frame_number)
+        ]
+        values = preferred or observations
+        return min(values, key=lambda item: abs(item[0] - frame_number))[1]
+
+    @staticmethod
+    def _handover_score(
+        first_box: tuple[float, float, float, float],
+        previous_box: tuple[float, float, float, float],
+        frame_gap: int,
+    ) -> float:
+        first = np.asarray(first_box, dtype=np.float32)
+        previous = np.asarray(previous_box, dtype=np.float32)
+        first_foot = np.asarray(((first[0] + first[2]) / 2.0, first[3]))
+        previous_foot = np.asarray(((previous[0] + previous[2]) / 2.0, previous[3]))
+        body_scale = max(12.0, ((first[3] - first[1]) + (previous[3] - previous[1])) / 2.0)
+        position_error = float(np.linalg.norm(first_foot - previous_foot)) / body_scale
+        time_error = abs(frame_gap) / 45.0
+        return position_error + 0.35 * time_error
 
     def _detect_team_switches(
         self,

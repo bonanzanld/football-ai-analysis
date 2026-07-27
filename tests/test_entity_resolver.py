@@ -41,6 +41,59 @@ class EntityResolverTests(unittest.TestCase):
         self.assertEqual(entity.team, TeamAssignment.TEAM_A)
         self.assertEqual(entity.source, EntityDecisionSource.MANUAL)
 
+    def test_automatic_goalkeeper_role_is_supported(self) -> None:
+        entity = EntityResolver().resolve(
+            track_id=8,
+            automatic_team_id=1,
+            automatic_role=EntityRole.GOALKEEPER,
+        )
+
+        self.assertEqual(entity.role, EntityRole.GOALKEEPER)
+        self.assertEqual(entity.team, TeamAssignment.TEAM_B)
+        self.assertEqual(entity.source, EntityDecisionSource.AUTOMATIC)
+
+    def test_manual_player_overrides_automatic_goalkeeper(self) -> None:
+        corrections = EntityCorrectionSet(
+            source_video="wedstrijd.mp4",
+            corrections=(
+                TrackCorrection(
+                    track_id=8,
+                    role=EntityRole.PLAYER,
+                    team=TeamAssignment.TEAM_A,
+                ),
+            ),
+        )
+        entity = EntityResolver(corrections).resolve(
+            track_id=8,
+            automatic_team_id=1,
+            automatic_role=EntityRole.GOALKEEPER,
+        )
+
+        self.assertEqual(entity.role, EntityRole.PLAYER)
+        self.assertEqual(entity.team, TeamAssignment.TEAM_A)
+        self.assertEqual(entity.source, EntityDecisionSource.MANUAL)
+
+    def test_temporary_team_evidence_never_overrides_manual_team(self) -> None:
+        corrections = EntityCorrectionSet(
+            source_video="wedstrijd.mp4",
+            corrections=(
+                TrackCorrection(
+                    track_id=8,
+                    role=EntityRole.PLAYER,
+                    team=TeamAssignment.TEAM_A,
+                ),
+            ),
+        )
+
+        entity = EntityResolver(corrections).resolve(
+            track_id=8,
+            automatic_team_id=1,
+            prefer_current_team=True,
+        )
+
+        self.assertEqual(entity.team, TeamAssignment.TEAM_A)
+        self.assertEqual(entity.source, EntityDecisionSource.MANUAL)
+
     def test_manual_staff_is_excluded(self) -> None:
         corrections = EntityCorrectionSet(
             source_video="wedstrijd.mp4",

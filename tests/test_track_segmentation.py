@@ -15,7 +15,7 @@ class TrackSegmentationTests(unittest.TestCase):
     def test_splits_after_sustained_team_change_and_backdates_boundary(self) -> None:
         evidence = [
             TeamEvidence(frame, 0 if frame < 10 else 1, 0.5)
-            for frame in range(20)
+            for frame in range(30)
         ]
 
         result = segment_track_by_team_switches(23, evidence, initial_team_id=0)
@@ -46,7 +46,7 @@ class TrackSegmentationTests(unittest.TestCase):
     def test_persists_versioned_segmentation_set(self) -> None:
         segmentation = segment_track_by_team_switches(
             23,
-            [TeamEvidence(frame, 0 if frame < 5 else 1, 0.5) for frame in range(12)],
+            [TeamEvidence(frame, 0 if frame < 5 else 1, 0.5) for frame in range(24)],
             initial_team_id=0,
         )
         data = TrackSegmentationSet("match.mov", 30.0, (segmentation,))

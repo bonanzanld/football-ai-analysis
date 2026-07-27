@@ -23,6 +23,7 @@ FOOTPOINT_COLOR = (0, 255, 0)
 FOOTPOINT_OUTLINE_COLOR = (0, 64, 0)
 BALL_COLOR = (0, 255, 255)
 BALL_PREDICTED_COLOR = (0, 165, 255)
+BALL_INTERPOLATED_COLOR = (0, 140, 255)
 
 
 def draw_ball_observation(
@@ -40,13 +41,19 @@ def draw_ball_observation(
         return annotated
     x = int(np.clip(center[0], 0, frame_width - 1))
     y = int(np.clip(center[1], 0, frame_height - 1))
-    color = BALL_COLOR if observation.source == "detected" else BALL_PREDICTED_COLOR
+    colors = {
+        "detected": BALL_COLOR,
+        "interpolated": BALL_INTERPOLATED_COLOR,
+    }
+    color = colors.get(observation.source, BALL_PREDICTED_COLOR)
     radius = 10 if observation.source == "detected" else 8
     cv2.circle(annotated, (x, y), radius, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.circle(annotated, (x, y), radius, color, 2, cv2.LINE_AA)
     label = f"BAL {observation.confidence:.0%}"
     if observation.source == "predicted":
         label += " voorspeld"
+    elif observation.source == "interpolated":
+        label += " geïnterpoleerd"
     cv2.putText(
         annotated,
         label,

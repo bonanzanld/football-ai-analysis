@@ -18,6 +18,7 @@ from football_ai.detection.ball_tracking import (
     BallTracker,
     candidates_from_detections,
     exclude_candidates_inside_people,
+    interpolate_detected_gaps,
     save_ball_observations,
 )
 from football_ai.detector import FootballDetector
@@ -86,12 +87,26 @@ def main() -> None:
         if observation is not None:
             observations_by_frame[analyzed_frame] = observation
 
+    final_observations = interpolate_detected_gaps(
+        tracker.observations,
+        maximum_gap_frames=12,
+        maximum_speed_pixels_per_frame=75.0,
+    )
+    observations_by_frame = {
+        observation.frame_number: observation
+        for observation in final_observations
+    }
+
     detected_frames = sum(
         observation.source == "detected"
         for observation in observations_by_frame.values()
     )
     predicted_frames = sum(
         observation.source == "predicted"
+        for observation in observations_by_frame.values()
+    )
+    interpolated_frames = sum(
+        observation.source == "interpolated"
         for observation in observations_by_frame.values()
     )
 
@@ -129,11 +144,12 @@ def main() -> None:
 
     if writer is None:
         raise RuntimeError("De renderpass bevatte geen videoframes.")
-    save_ball_observations(tracker.observations, report_path, str(video_path), fps)
+    save_ball_observations(final_observations, report_path, str(video_path), fps)
     _transcode(raw_path, output_path)
-    coverage = (detected_frames + predicted_frames) / frame_number
+    coverage = (detected_frames + predicted_frames + interpolated_frames) / frame_number
     print(f"Bal gedetecteerd: {detected_frames}/{frame_number} frames")
     print(f"Kort voorspeld: {predicted_frames}/{frame_number} frames")
+    print(f"Achteraf geïnterpoleerd: {interpolated_frames}/{frame_number} frames")
     print(f"Totale zichtbaarheid: {coverage:.1%}")
     print(f"QA-video: {output_path}")
     print(f"Balrapport: {report_path}")

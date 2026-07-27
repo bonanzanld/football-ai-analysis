@@ -244,6 +244,55 @@ class BallTracker:
         return 0.35 <= ratio <= 2.8 and 0.0 <= candidate.confidence <= 1.0
 
 
+def interpolate_detected_gaps(
+    observations: Iterable[BallObservation],
+    maximum_gap_frames: int = 12,
+    maximum_speed_pixels_per_frame: float = 75.0,
+) -> tuple[BallObservation, ...]:
+    """Fill short, plausible gaps bounded by two actual ball detections.
+
+    This is deliberately a retrospective operation: unlike a live prediction,
+    interpolation knows where the ball was detected again. Existing predicted
+    observations inside an accepted gap are replaced, while long gaps and
+    implausible jumps remain unknown.
+    """
+
+    if maximum_gap_frames < 0:
+        raise ValueError("maximum_gap_frames must be non-negative")
+    if maximum_speed_pixels_per_frame <= 0.0:
+        raise ValueError("maximum_speed_pixels_per_frame must be positive")
+
+    ordered = sorted(observations, key=lambda item: item.frame_number)
+    by_frame = {item.frame_number: item for item in ordered}
+    detected = [item for item in ordered if item.source == "detected"]
+    for start, end in zip(detected, detected[1:], strict=False):
+        frame_delta = end.frame_number - start.frame_number
+        missing_frames = frame_delta - 1
+        if missing_frames <= 0 or missing_frames > maximum_gap_frames:
+            continue
+        displacement = float(np.linalg.norm(np.subtract(end.center, start.center)))
+        if displacement / frame_delta > maximum_speed_pixels_per_frame:
+            continue
+
+        start_box = np.asarray(start.box, dtype=np.float64)
+        end_box = np.asarray(end.box, dtype=np.float64)
+        start_center = np.asarray(start.center, dtype=np.float64)
+        end_center = np.asarray(end.center, dtype=np.float64)
+        confidence = min(start.confidence, end.confidence) * 0.70
+        for frame_number in range(start.frame_number + 1, end.frame_number):
+            fraction = (frame_number - start.frame_number) / frame_delta
+            center = start_center + fraction * (end_center - start_center)
+            box = start_box + fraction * (end_box - start_box)
+            by_frame[frame_number] = BallObservation(
+                frame_number=frame_number,
+                center=tuple(float(value) for value in center),
+                box=tuple(float(value) for value in box),
+                confidence=float(confidence),
+                source="interpolated",
+            )
+    return tuple(by_frame[frame] for frame in sorted(by_frame))
+
+
 def candidates_from_detections(detections: object) -> list[BallCandidate]:
     xyxy = getattr(detections, "xyxy", ())
     confidence = getattr(detections, "confidence", ())

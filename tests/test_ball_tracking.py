@@ -5,8 +5,10 @@ import unittest
 
 from football_ai.detection.ball_tracking import (
     BallCandidate,
+    BallObservation,
     BallTracker,
     exclude_candidates_inside_people,
+    interpolate_detected_gaps,
     save_ball_observations,
 )
 
@@ -194,6 +196,40 @@ class BallTrackerTests(unittest.TestCase):
         candidate = BallCandidate((45, 92, 55, 102), 0.80)
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
         self.assertEqual(result, [candidate])
+
+    def test_interpolates_short_gap_between_real_detections(self) -> None:
+        tracker = BallTracker(maximum_gap_frames=1)
+        tracker.update(0, [BallCandidate((10, 10, 20, 20), 0.90)])
+        tracker.update(1, [])
+        tracker.update(2, [])
+        tracker.update(3, [BallCandidate((40, 10, 50, 20), 0.80)])
+
+        result = interpolate_detected_gaps(tracker.observations)
+        by_frame = {item.frame_number: item for item in result}
+
+        self.assertEqual(by_frame[1].source, "interpolated")
+        self.assertEqual(by_frame[2].source, "interpolated")
+        self.assertAlmostEqual(by_frame[1].center[0], 25.0)
+        self.assertAlmostEqual(by_frame[2].center[0], 35.0)
+
+    def test_does_not_interpolate_long_gap(self) -> None:
+        observations = (
+            BallObservation(0, (10.0, 10.0), (5.0, 5.0, 15.0, 15.0), 0.9, "detected"),
+            BallObservation(20, (20.0, 10.0), (15.0, 5.0, 25.0, 15.0), 0.9, "detected"),
+        )
+        result = interpolate_detected_gaps(observations, maximum_gap_frames=12)
+        self.assertEqual(len(result), 2)
+
+    def test_does_not_interpolate_implausible_jump(self) -> None:
+        observations = (
+            BallObservation(0, (10.0, 10.0), (5.0, 5.0, 15.0, 15.0), 0.9, "detected"),
+            BallObservation(3, (400.0, 10.0), (395.0, 5.0, 405.0, 15.0), 0.9, "detected"),
+        )
+        result = interpolate_detected_gaps(
+            observations,
+            maximum_speed_pixels_per_frame=75.0,
+        )
+        self.assertEqual(len(result), 2)
 
 
 if __name__ == "__main__":

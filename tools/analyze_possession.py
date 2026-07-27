@@ -74,8 +74,10 @@ def main() -> None:
     _transcode(raw_path, output_path)
 
     controlled = sum(item.state is PossessionState.CONTROLLED for item in observations)
+    inferred = sum(item.state is PossessionState.INFERRED for item in observations)
     contested = sum(item.state is PossessionState.CONTESTED for item in observations)
     print(f"Bevestigd balbezit: {controlled}/{len(observations)} frames")
+    print(f"Vermoedelijk behouden bezit: {inferred}/{len(observations)} frames")
     print(f"Duel/onzeker bezit: {contested}/{len(observations)} frames")
     print(f"Voorlopige passkandidaten: {len(tracker.passes)}")
     print(f"QA-video: {output_path}")
@@ -95,9 +97,13 @@ def _render(base_video: Path, raw_path: Path, observations, entities_by_frame) -
             if not success:
                 break
             observation = observations[frame_number]
-            color = (0, 255, 0) if observation.state is PossessionState.CONTROLLED else (0, 165, 255)
+            color = {
+                PossessionState.CONTROLLED: (0, 255, 0),
+                PossessionState.INFERRED: (0, 215, 255),
+            }.get(observation.state, (0, 165, 255))
             label = {
                 PossessionState.CONTROLLED: f"BALBEZIT: {observation.label}",
+                PossessionState.INFERRED: f"BALBEZIT VERMOEDELIJK: {observation.label}",
                 PossessionState.CONTESTED: "BALBEZIT: DUEL / ONZEKER",
                 PossessionState.LOOSE: "BALBEZIT: LOSSE BAL",
                 PossessionState.UNKNOWN: "BALBEZIT: BAL NIET BETROUWBAAR ZICHTBAAR",
@@ -112,6 +118,19 @@ def _render(base_video: Path, raw_path: Path, observations, entities_by_frame) -
                 if owner is not None:
                     point = tuple(int(round(value)) for value in owner.footpoint)
                     cv2.circle(frame, point, 13, color, 3, cv2.LINE_AA)
+                    if observation.state is PossessionState.INFERRED:
+                        cv2.circle(frame, point, 9, (0, 0, 0), 3, cv2.LINE_AA)
+                        cv2.circle(frame, point, 9, (0, 255, 255), 2, cv2.LINE_AA)
+                        cv2.putText(
+                            frame,
+                            "BAL vermoedelijk",
+                            (point[0] + 13, max(22, point[1] - 9)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.48,
+                            (0, 255, 255),
+                            2,
+                            cv2.LINE_AA,
+                        )
             if writer is None:
                 writer = cv2.VideoWriter(str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame.shape[1], frame.shape[0]))
             writer.write(frame)

@@ -89,8 +89,8 @@ def main() -> None:
 
     final_observations = interpolate_detected_gaps(
         tracker.observations,
-        maximum_gap_frames=12,
-        maximum_speed_pixels_per_frame=75.0,
+        maximum_gap_frames=24,
+        maximum_speed_pixels_per_frame=100.0,
     )
     observations_by_frame = {
         observation.frame_number: observation

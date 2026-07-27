@@ -13,6 +13,7 @@ from football_ai.detection.ball_tracking import BallObservation
 
 class PossessionState(StrEnum):
     CONTROLLED = "controlled"
+    INFERRED = "inferred"
     CONTESTED = "contested"
     LOOSE = "loose"
     UNKNOWN = "unknown"
@@ -59,12 +60,14 @@ class PossessionTracker:
     def __init__(
         self,
         confirmation_frames: int = 3,
-        hold_frames: int = 4,
         minimum_pass_confidence: float = 0.35,
+        inferred_confidence_decay: float = 0.985,
+        minimum_inferred_confidence: float = 0.12,
     ) -> None:
         self.confirmation_frames = confirmation_frames
-        self.hold_frames = hold_frames
         self.minimum_pass_confidence = minimum_pass_confidence
+        self.inferred_confidence_decay = inferred_confidence_decay
+        self.minimum_inferred_confidence = minimum_inferred_confidence
         self._owner_key: tuple[int | None, int] | None = None
         self._owner: TimelineEntity | None = None
         self._candidate_key: tuple[int | None, int] | None = None
@@ -84,11 +87,20 @@ class PossessionTracker:
         key = _entity_key(candidate)
         if candidate is None or state is not PossessionState.CONTROLLED:
             self._missing += 1
-            if self._owner is not None and self._missing <= self.hold_frames:
-                return _observation(frame_number, PossessionState.CONTESTED, self._owner, confidence * 0.5)
             self._candidate_key = None
             self._candidate = None
             self._candidate_count = 0
+            if self._owner is not None:
+                inferred_confidence = max(
+                    self.minimum_inferred_confidence,
+                    self.inferred_confidence_decay ** self._missing,
+                )
+                return _observation(
+                    frame_number,
+                    PossessionState.INFERRED,
+                    self._owner,
+                    inferred_confidence,
+                )
             return _observation(frame_number, state, None, confidence)
 
         self._missing = 0
@@ -103,7 +115,14 @@ class PossessionTracker:
         else:
             self._candidate_count += 1
         if self._candidate_count < self.confirmation_frames:
-            return _observation(frame_number, PossessionState.CONTESTED, self._owner, confidence * 0.6)
+            if self._owner is not None:
+                return _observation(
+                    frame_number,
+                    PossessionState.INFERRED,
+                    self._owner,
+                    max(self.minimum_inferred_confidence, confidence * 0.6),
+                )
+            return _observation(frame_number, PossessionState.CONTESTED, None, confidence * 0.6)
 
         previous = self._owner
         previous_change = self._last_change_frame

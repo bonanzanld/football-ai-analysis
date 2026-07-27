@@ -43,6 +43,33 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(tracker.passes[0].from_label, "Speler 1")
         self.assertEqual(tracker.passes[0].to_label, "Speler 2")
 
+    def test_keeps_same_owner_when_ball_temporarily_disappears(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        player = entity(1, TeamAssignment.TEAM_A, 100)
+        tracker.update(0, ball(0, 100), [player])
+        tracker.update(1, ball(1, 100), [player])
+
+        result = tracker.update(2, None, [player])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.identity_id, player.identity_id)
+        self.assertEqual(result.team, TeamAssignment.TEAM_A.value)
+
+    def test_opponent_must_be_confirmed_before_possession_changes(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=2)
+        first = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 200)
+        tracker.update(0, ball(0, 100), [first])
+        tracker.update(1, ball(1, 100), [first])
+
+        pending = tracker.update(2, ball(2, 200), [opponent])
+        changed = tracker.update(3, ball(3, 200), [opponent])
+
+        self.assertEqual(pending.state, PossessionState.INFERRED)
+        self.assertEqual(pending.team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(changed.state, PossessionState.CONTROLLED)
+        self.assertEqual(changed.team, TeamAssignment.TEAM_B.value)
+
 
 if __name__ == "__main__":
     unittest.main()

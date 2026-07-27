@@ -207,9 +207,66 @@ def save_possession_report(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": 2,
         "source_video": source_video,
         "fps": fps,
+        "statistics": build_possession_statistics(observations, fps),
         "observations": [item.to_dict() for item in observations],
         "passes": [item.to_dict() for item in passes],
     }, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def build_possession_statistics(
+    observations: list[PossessionObservation],
+    fps: float,
+) -> dict:
+    """Count confirmed and inferred possession without conflating certainty.
+
+    Inferred frames contribute to total possession time for the last confirmed
+    player and team. They remain separately visible so downstream statistics
+    can report both the practical estimate and its evidential quality.
+    """
+
+    safe_fps = max(float(fps), 1e-6)
+    teams: dict[str, dict] = {}
+    players: dict[str, dict] = {}
+    for item in observations:
+        if item.state not in {PossessionState.CONTROLLED, PossessionState.INFERRED}:
+            continue
+        if item.team is None or item.label is None:
+            continue
+        certainty = (
+            "confirmed_frames"
+            if item.state is PossessionState.CONTROLLED
+            else "inferred_frames"
+        )
+        team_stats = teams.setdefault(
+            item.team,
+            {"confirmed_frames": 0, "inferred_frames": 0},
+        )
+        team_stats[certainty] += 1
+        player_key = (
+            str(item.identity_id)
+            if item.identity_id is not None
+            else f"track:{item.track_id}"
+        )
+        player_stats = players.setdefault(
+            player_key,
+            {
+                "label": item.label,
+                "team": item.team,
+                "confirmed_frames": 0,
+                "inferred_frames": 0,
+            },
+        )
+        player_stats[certainty] += 1
+
+    for collection in (teams, players):
+        for stats in collection.values():
+            total = stats["confirmed_frames"] + stats["inferred_frames"]
+            stats["total_possession_frames"] = total
+            stats["total_possession_seconds"] = total / safe_fps
+            stats["inferred_share"] = (
+                stats["inferred_frames"] / total if total else 0.0
+            )
+    return {"teams": teams, "players": players}

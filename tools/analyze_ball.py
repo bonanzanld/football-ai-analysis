@@ -89,7 +89,10 @@ def main() -> None:
 
     final_observations = interpolate_detected_gaps(
         tracker.observations,
-        maximum_gap_frames=24,
+        # Achtergrondcamouflage (bijvoorbeeld een witte bal voor een gebouw of
+        # reclamebord) kan langer duren dan een gewone spelersocclusie. Werk
+        # daarom in seconden, zodat dezelfde grens bij iedere framerate geldt.
+        maximum_gap_frames=max(1, int(round(fps * 1.5))),
         maximum_speed_pixels_per_frame=100.0,
     )
     observations_by_frame = {

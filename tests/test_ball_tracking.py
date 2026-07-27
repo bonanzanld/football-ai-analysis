@@ -231,6 +231,36 @@ class BallTrackerTests(unittest.TestCase):
         )
         self.assertEqual(len(result), 2)
 
+    def test_interpolates_airborne_ball_hidden_against_similar_background(self) -> None:
+        observations = (
+            BallObservation(
+                0,
+                (200.0, 500.0),
+                (190.0, 490.0, 210.0, 510.0),
+                0.82,
+                "detected",
+            ),
+            BallObservation(
+                31,
+                (820.0, 260.0),
+                (812.0, 252.0, 828.0, 268.0),
+                0.74,
+                "detected",
+            ),
+        )
+
+        result = interpolate_detected_gaps(
+            observations,
+            maximum_gap_frames=45,
+            maximum_speed_pixels_per_frame=100.0,
+        )
+        by_frame = {item.frame_number: item for item in result}
+
+        self.assertEqual(len(result), 32)
+        self.assertEqual(by_frame[15].source, "interpolated")
+        self.assertLess(by_frame[15].center[1], observations[0].center[1])
+        self.assertGreater(by_frame[15].center[0], observations[0].center[0])
+
 
 if __name__ == "__main__":
     unittest.main()

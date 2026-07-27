@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 
 from football_ai.analysis.entity_timeline import TimelineEntity
-from football_ai.analysis.possession import PossessionState, PossessionTracker
+from football_ai.analysis.possession import (
+    PossessionObservation,
+    PossessionState,
+    PossessionTracker,
+    build_possession_statistics,
+)
 from football_ai.detection.ball_tracking import BallObservation
 from football_ai.tracking.entity_corrections import EntityRole, TeamAssignment
 
@@ -69,6 +74,28 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(pending.team, TeamAssignment.TEAM_A.value)
         self.assertEqual(changed.state, PossessionState.CONTROLLED)
         self.assertEqual(changed.team, TeamAssignment.TEAM_B.value)
+
+    def test_inferred_possession_counts_for_team_and_player_statistics(self) -> None:
+        observations = [
+            PossessionObservation(
+                0, PossessionState.CONTROLLED, 7, 12, "Speler 7", "team_a", 0.8
+            ),
+            PossessionObservation(
+                1, PossessionState.INFERRED, 7, 12, "Speler 7", "team_a", 0.6
+            ),
+            PossessionObservation(
+                2, PossessionState.INFERRED, 7, 12, "Speler 7", "team_a", 0.5
+            ),
+        ]
+
+        statistics = build_possession_statistics(observations, fps=2.0)
+
+        self.assertEqual(statistics["teams"]["team_a"]["total_possession_frames"], 3)
+        self.assertEqual(statistics["players"]["7"]["inferred_frames"], 2)
+        self.assertAlmostEqual(
+            statistics["players"]["7"]["total_possession_seconds"],
+            1.5,
+        )
 
 
 if __name__ == "__main__":

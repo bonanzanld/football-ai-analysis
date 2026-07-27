@@ -23,6 +23,11 @@ from football_ai.analysis.possession import (
     should_render_inferred_ball,
 )
 from football_ai.detection.ball_tracking import BallObservation
+from football_ai.visualization.tactical_map import (
+    CameraRelativeProjector,
+    TacticalMapRenderer,
+    TeamHeatmapAccumulator,
+)
 
 
 def main() -> None:
@@ -86,6 +91,8 @@ def main() -> None:
     _render(
         base_video,
         raw_path,
+        output_dir,
+        prefix,
         observations,
         entities_by_frame,
         balls,
@@ -109,6 +116,8 @@ def main() -> None:
 def _render(
     base_video: Path,
     raw_path: Path,
+    output_dir: Path,
+    prefix: str,
     observations,
     entities_by_frame,
     balls,
@@ -129,12 +138,19 @@ def _render(
     turnovers_at = {item.end_frame: item for item in turnovers}
     recent_events: deque[tuple[int, str, tuple[int, int, int]]] = deque(maxlen=5)
     active_event: tuple[int, str, tuple[int, int, int]] | None = None
+    projector = CameraRelativeProjector()
+    tactical_map = TacticalMapRenderer(projector)
+    heatmaps = TeamHeatmapAccumulator(projector)
+    source_frame_size: tuple[int, int] | None = None
     try:
         while frame_number < len(observations):
             success, frame = capture.read()
             if not success:
                 break
             observation = observations[frame_number]
+            source_frame_size = (frame.shape[1], frame.shape[0])
+            frame_entities = entities_by_frame.get(frame_number, [])
+            heatmaps.add(frame_entities, source_frame_size)
             color = {
                 PossessionState.CONTROLLED: (0, 255, 0),
                 PossessionState.INFERRED: (0, 215, 255),
@@ -150,7 +166,7 @@ def _render(
             cv2.putText(frame, label, (16, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.72, color, 2, cv2.LINE_AA)
             if observation.track_id is not None:
                 owner = next(
-                    (item for item in entities_by_frame.get(frame_number, []) if item.track_id == observation.track_id),
+                    (item for item in frame_entities if item.track_id == observation.track_id),
                     None,
                 )
                 if owner is not None:
@@ -194,7 +210,7 @@ def _render(
                 text = f"BALVERLIES: {_short_name(event.from_label)}"
                 active_event = (frame_number, text, (0, 90, 255))
                 recent_events.appendleft(active_event)
-            panel_width = max(390, int(round(frame.shape[1] * 0.30)))
+            panel_width = max(430, int(round(frame.shape[1] * 0.34)))
             canvas = cv2.copyMakeBorder(
                 frame,
                 0,
@@ -217,6 +233,10 @@ def _render(
                 loss_counts,
                 active_event,
                 recent_events,
+                tactical_map,
+                frame_entities,
+                balls.get(frame_number),
+                source_frame_size,
             )
             if writer is None:
                 writer = cv2.VideoWriter(
@@ -231,6 +251,10 @@ def _render(
         capture.release()
         if writer is not None:
             writer.release()
+    if source_frame_size is not None:
+        team_a_path, team_b_path = heatmaps.save(output_dir, prefix, team_names)
+        print(f"Heatmap team A: {team_a_path}")
+        print(f"Heatmap team B: {team_b_path}")
 
 
 def _team_names(observations) -> dict[str, str]:
@@ -260,6 +284,10 @@ def _draw_dashboard(
     loss_counts,
     active_event,
     recent_events,
+    tactical_map,
+    entities,
+    ball,
+    source_frame_size,
 ) -> None:
     cv2.rectangle(canvas, (x0, 0), (x0 + width, canvas.shape[0]), (19, 43, 24), -1)
     cv2.line(canvas, (x0, 0), (x0, canvas.shape[0]), (70, 100, 70), 2)
@@ -281,7 +309,7 @@ def _draw_dashboard(
     cv2.putText(canvas, owner, (left, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (235, 235, 235), 1, cv2.LINE_AA)
 
     total = sum(team_frames.values())
-    y = 188
+    y = 176
     team_colors = {
         "team_a": (255, 130, 20),
         "team_b": (30, 70, 255),
@@ -292,25 +320,36 @@ def _draw_dashboard(
         cv2.putText(canvas, name[:22], (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, team_color, 2, cv2.LINE_AA)
         cv2.putText(canvas, f"Bezit {percentage:5.1f}%", (left, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (240, 240, 240), 1, cv2.LINE_AA)
         cv2.putText(canvas, f"Passes {pass_counts.get(team, 0)}   Balverlies {loss_counts.get(team, 0)}", (left, y + 54), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (205, 215, 205), 1, cv2.LINE_AA)
-        y += 92
+        y += 78
 
+    map_top = y + 22
+    map_bottom = min(canvas.shape[0] - 142, map_top + max(150, int(round(width * 0.54))))
+    tactical_map.draw(
+        canvas,
+        (left + 8, map_top, x0 + width - 30, map_bottom),
+        entities,
+        ball,
+        observation,
+        source_frame_size,
+    )
+    y = map_bottom + 28
     cv2.line(canvas, (left, y), (x0 + width - 22, y), (70, 100, 70), 1)
-    y += 32
+    y += 28
     if active_event is not None and frame_number - active_event[0] <= int(round(fps * 2.5)):
         _, event_text, event_color = active_event
         cv2.rectangle(canvas, (left - 8, y - 24), (x0 + width - 18, y + 20), (30, 55, 30), -1)
         cv2.putText(canvas, event_text[:38], (left, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.52, event_color, 2, cv2.LINE_AA)
         y += 62
 
-    cv2.putText(canvas, "RECENTE GEBEURTENISSEN", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 220, 210), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "RECENTE GEBEURTENISSEN", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 220, 210), 1, cv2.LINE_AA)
     y += 28
-    for event_frame, event_text, event_color in recent_events:
+    for event_frame, event_text, event_color in list(recent_events)[:3]:
         event_seconds = event_frame / max(fps, 1e-6)
         stamp = f"{int(event_seconds // 60):02d}:{int(event_seconds % 60):02d}"
         cv2.putText(canvas, f"{stamp}  {event_text[:31]}", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.43, event_color, 1, cv2.LINE_AA)
         y += 24
 
-    cv2.putText(canvas, "Bezit omvat bevestigd + vermoedelijk", (left, canvas.shape[0] - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (155, 175, 155), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "Kaart/heatmaps zijn nog camera-relatief", (left, canvas.shape[0] - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (155, 175, 155), 1, cv2.LINE_AA)
 
 
 def _transcode(raw_path: Path, output_path: Path) -> None:

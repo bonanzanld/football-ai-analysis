@@ -54,6 +54,8 @@ def draw_ball_observation(
         label += " voorspeld"
     elif observation.source == "interpolated":
         label += " geïnterpoleerd"
+    elif observation.source == "stationary_hold":
+        label = "BAL vermoedelijk stilstaand"
     cv2.putText(
         annotated,
         label,

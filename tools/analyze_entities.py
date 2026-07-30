@@ -13,6 +13,7 @@ if str(SRC_PATH) not in sys.path:
 from football_ai.detector import FootballDetector
 from football_ai.tracking.entity_corrections import load_entity_corrections
 from football_ai.tracking.entity_identity import load_entity_identities
+from football_ai.tracking.entity_roster import load_team_roster
 from football_ai.video_processor import VideoProcessor
 
 
@@ -38,6 +39,7 @@ def main() -> None:
     default_corrections_path = output_dir / f"{video_path.stem}_entity_corrections.json"
     identities_path = output_dir / f"{video_path.stem}_entity_identities.json"
     timeline_path = output_dir / f"{video_path.stem}_entity_timeline.json"
+    roster_path = output_dir / f"{video_path.stem}_team_roster.json"
     corrections_path = args.corrections or (
         default_corrections_path if default_corrections_path.exists() else None
     )
@@ -47,11 +49,14 @@ def main() -> None:
         else None
     )
     identities = load_entity_identities(identities_path) if identities_path.exists() else None
+    roster = load_team_roster(roster_path) if roster_path.exists() else None
 
     if corrections is not None:
         print(f"Bestaande persoonscorrecties worden toegepast: {corrections_path}")
     if identities is not None:
         print(f"Fysieke spelersidentiteiten worden toegepast: {identities_path}")
+    if roster is not None:
+        print(f"Spelersnamen van het eigen team worden toegepast: {roster_path}")
 
     processor = VideoProcessor(
         detector=FootballDetector(player_threshold=0.20, ball_threshold=0.05),
@@ -59,6 +64,7 @@ def main() -> None:
         debug_homography=False,
         entity_corrections=corrections,
         entity_identities=identities,
+        team_roster=roster,
     )
     frames = processor.process(
         video_path=video_path,

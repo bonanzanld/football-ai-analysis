@@ -7,8 +7,10 @@ from typing import Any
 
 from football_ai.tracking.entity_corrections import EntityRole, TeamAssignment
 from football_ai.tracking.entity_identity import EntityIdentitySet
-from football_ai.tracking.entity_resolver import EntityResolver
+from football_ai.tracking.entity_roster import TeamRoster
+from football_ai.tracking.entity_resolver import EntityDecisionSource, EntityResolver
 from football_ai.tracking.track_segmentation import TrackSegmentation
+from football_ai.tracking.box_interpolation import observations_with_short_gaps
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +93,7 @@ def build_entity_timeline(
     observations = []
     for track in tracks:
         identity = identity_by_track.get(track.track_id)
-        for frame_number, box in zip(track.observation_frames, track.boxes, strict=True):
+        for frame_number, box in observations_with_short_gaps(track):
             segment = segmentations.get(track.track_id)
             active = segment.segment_at(frame_number) if segment is not None else None
             team_id = active.team_id if active is not None else final_teams.get(track.track_id)
@@ -100,14 +102,27 @@ def build_entity_timeline(
                 team_id,
                 segment_index=active.index if active is not None else None,
             )
+            # Een fysieke identiteit bundelt het bewijs over de volledige track
+            # en is daardoor sterker dan een tijdelijke automatische kleurstem.
+            # Alleen een expliciete handmatige (segment)correctie mag een reeds
+            # bevestigde identiteit overrulen.
+            identity_matches_segment = (
+                identity is not None
+                and (
+                    entity.source is not EntityDecisionSource.MANUAL
+                    or identity.team is TeamAssignment.UNKNOWN
+                    or entity.team is TeamAssignment.UNKNOWN
+                    or identity.team is entity.team
+                )
+            )
             role = (
                 identity.role
-                if identity is not None and identity.role is not EntityRole.UNKNOWN
+                if identity_matches_segment and identity.role is not EntityRole.UNKNOWN
                 else entity.role
             )
             team = (
                 identity.team
-                if identity is not None and identity.team is not TeamAssignment.UNKNOWN
+                if identity_matches_segment and identity.team is not TeamAssignment.UNKNOWN
                 else entity.team
             )
             if entity.excluded or role not in (EntityRole.PLAYER, EntityRole.GOALKEEPER):
@@ -117,8 +132,14 @@ def build_entity_timeline(
                 TimelineEntity(
                     frame_number=int(frame_number),
                     track_id=track.track_id,
-                    identity_id=identity.identity_id if identity is not None else None,
-                    label=identity.label if identity is not None else f"ID {track.track_id}",
+                    identity_id=(
+                        identity.identity_id if identity_matches_segment else None
+                    ),
+                    label=(
+                        identity.label
+                        if identity_matches_segment
+                        else _segment_label(track.track_id, active.index if active else None)
+                    ),
                     role=role,
                     team=team,
                     box=(x1, y1, x2, y2),
@@ -129,6 +150,12 @@ def build_entity_timeline(
     return EntityTimeline(source_video, fps, tuple(observations))
 
 
+def _segment_label(track_id: int, segment_index: int | None) -> str:
+    if segment_index is None:
+        return f"ID {track_id}"
+    return f"ID {track_id}.{segment_index}"
+
+
 def save_entity_timeline(timeline: EntityTimeline, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(timeline.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
@@ -136,3 +163,29 @@ def save_entity_timeline(timeline: EntityTimeline, path: Path) -> None:
 
 def load_entity_timeline(path: Path) -> EntityTimeline:
     return EntityTimeline.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def apply_team_roster(timeline: EntityTimeline, roster: TeamRoster) -> EntityTimeline:
+    """Add human names without changing tracker or physical identity keys."""
+    if Path(timeline.source_video).name != Path(roster.source_video).name:
+        raise ValueError("Spelerslijst en entiteitentijdlijn horen bij verschillende video's.")
+    observations = []
+    for item in timeline.observations:
+        label = item.label
+        if item.team is roster.own_team and item.identity_id is not None:
+            player = roster.display_label(item.identity_id, "")
+            if player:
+                label = f"{roster.own_team_name} - {player}"
+        observations.append(
+            TimelineEntity(
+                frame_number=item.frame_number,
+                track_id=item.track_id,
+                identity_id=item.identity_id,
+                label=label,
+                role=item.role,
+                team=item.team,
+                box=item.box,
+                footpoint=item.footpoint,
+            )
+        )
+    return EntityTimeline(timeline.source_video, timeline.fps, tuple(observations))

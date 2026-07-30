@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .entity_corrections import TeamAssignment
+
 
 @dataclass(frozen=True, slots=True)
 class PositionPeriod:
@@ -76,8 +78,9 @@ class PlayerProfile:
 class TeamRoster:
     source_video: str
     own_team_name: str
+    own_team: TeamAssignment
     players: tuple[PlayerProfile, ...] = ()
-    schema_version: int = 1
+    schema_version: int = 2
 
     def display_label(self, identity_id: int, fallback: str) -> str:
         profile = next((item for item in self.players if item.identity_id == identity_id), None)
@@ -91,19 +94,21 @@ class TeamRoster:
             "schema_version": self.schema_version,
             "source_video": self.source_video,
             "own_team_name": self.own_team_name,
+            "own_team": self.own_team.value,
             "players": [item.to_dict() for item in self.players],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "TeamRoster":
         version = int(data.get("schema_version", 1))
-        if version != 1:
+        if version not in (1, 2):
             raise ValueError(f"Niet-ondersteunde teamselectieversie: {version}")
         return cls(
             source_video=str(data["source_video"]),
             own_team_name=str(data["own_team_name"]),
+            own_team=TeamAssignment(data.get("own_team", TeamAssignment.TEAM_B.value)),
             players=tuple(PlayerProfile.from_dict(item) for item in data.get("players", [])),
-            schema_version=version,
+            schema_version=2,
         )
 
 

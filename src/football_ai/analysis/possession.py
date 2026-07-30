@@ -52,6 +52,8 @@ class PassEvent:
     to_label: str
     team: str
     confidence: float
+    from_track_id: int | None = None
+    to_track_id: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -69,6 +71,8 @@ class TurnoverEvent:
     to_team: str
     event_type: str
     confidence: float
+    from_track_id: int | None = None
+    to_track_id: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -83,6 +87,7 @@ class PossessionTracker:
         opponent_control_radius: float = 0.45,
         interception_contact_radius: float = 0.65,
         interception_ground_zone_ratio: float = 0.25,
+        teammate_reception_ground_zone_ratio: float = 0.60,
         dwell_control_frames: int = 6,
         motion_evidence_memory_frames: int = 6,
         low_speed_threshold: float = 4.0,
@@ -91,6 +96,11 @@ class PossessionTracker:
         minimum_pass_confidence: float = 0.12,
         inferred_confidence_decay: float = 0.985,
         minimum_inferred_confidence: float = 0.12,
+        owner_attachment_radius: float = 1.15,
+        same_player_handover_radius: float = 1.35,
+        synthetic_ball_override_confidence: float = 0.50,
+        long_travel_reception_frames: int = 10,
+        maximum_unseen_possession_frames: int = 12,
     ) -> None:
         self.confirmation_frames = confirmation_frames
         self.opponent_confirmation_frames = max(
@@ -101,6 +111,7 @@ class PossessionTracker:
         self.opponent_control_radius = opponent_control_radius
         self.interception_contact_radius = interception_contact_radius
         self.interception_ground_zone_ratio = interception_ground_zone_ratio
+        self.teammate_reception_ground_zone_ratio = teammate_reception_ground_zone_ratio
         self.dwell_control_frames = max(confirmation_frames, dwell_control_frames)
         self.motion_evidence_memory_frames = motion_evidence_memory_frames
         self.low_speed_threshold = low_speed_threshold
@@ -109,13 +120,22 @@ class PossessionTracker:
         self.minimum_pass_confidence = minimum_pass_confidence
         self.inferred_confidence_decay = inferred_confidence_decay
         self.minimum_inferred_confidence = minimum_inferred_confidence
-        self._owner_key: tuple[int | None, int] | None = None
+        self.owner_attachment_radius = owner_attachment_radius
+        self.same_player_handover_radius = same_player_handover_radius
+        self.synthetic_ball_override_confidence = synthetic_ball_override_confidence
+        self.long_travel_reception_frames = long_travel_reception_frames
+        self.maximum_unseen_possession_frames = max(
+            0,
+            int(maximum_unseen_possession_frames),
+        )
+        self._owner_key: tuple[int | None, int, str] | None = None
         self._owner: TimelineEntity | None = None
-        self._candidate_key: tuple[int | None, int] | None = None
+        self._candidate_key: tuple[int | None, int, str] | None = None
         self._candidate: TimelineEntity | None = None
         self._candidate_count = 0
         self._candidate_has_motion_evidence = False
         self._missing = 0
+        self._ball_unseen = 0
         self._last_change_frame: int | None = None
         self._ball_centers: list[np.ndarray] = []
         self._motion_evidence_age: int | None = None
@@ -130,6 +150,25 @@ class PossessionTracker:
         ball: BallObservation | None,
         entities: list[TimelineEntity],
     ) -> PossessionObservation:
+        missing_before_candidate = self._missing
+        # Een voorspeld/geinterpoleerd punt is hulpmateriaal, geen hard bewijs.
+        # Wanneer zo'n punt duidelijk los ligt van de actuele bezitter, krijgt
+        # de stabiele bezitshypothese voorrang. Een echte modeldetectie blijft
+        # altijd leidend en kan dus wel een pass of balverlies bevestigen.
+        current_owner = _current_entity(self._owner_key, entities)
+        if (
+            ball is not None
+            and ball.source in {"interpolated", "predicted", "stationary_hold"}
+            and ball.confidence < self.synthetic_ball_override_confidence
+            and current_owner is not None
+            and _normalized_ball_distance(ball, current_owner)
+            > self.owner_attachment_radius
+        ):
+            ball = None
+        if ball is None:
+            self._ball_unseen += 1
+        else:
+            self._ball_unseen = 0
         self._update_ball_motion(ball)
         candidate, state, confidence, normalized_distance = _nearest_candidate(
             ball,
@@ -169,6 +208,8 @@ class PossessionTracker:
                     to_team=candidate.team.value,
                     event_type="intercepted_pass",
                     confidence=confidence,
+                    from_track_id=previous.track_id,
+                    to_track_id=candidate.track_id,
                 )
             )
             self._owner = None
@@ -184,6 +225,26 @@ class PossessionTracker:
                 PossessionState.CONTESTED,
                 None,
                 confidence,
+            )
+        # Logische "magneet" rond het voetpunt. Zolang de bal nog duidelijk in
+        # de controlezone van de huidige bezitter ligt, mag een andere speler
+        # het bezit niet door één nipt kleinere beeldafstand overnemen. Een
+        # echte onderschepping is hierboven al apart en strenger beoordeeld.
+        current_owner = _current_entity(self._owner_key, entities)
+        owner_distance = _normalized_ball_distance(ball, current_owner)
+        if (
+            current_owner is not None
+            and owner_distance <= self.owner_attachment_radius
+            and key != self._owner_key
+        ):
+            self._owner = current_owner
+            candidate = current_owner
+            key = self._owner_key
+            state = PossessionState.CONTROLLED
+            confidence = max(
+                confidence,
+                max(0.0, 1.0 - owner_distance / self.owner_attachment_radius)
+                * (float(ball.confidence) if ball is not None else 0.0),
             )
         if (
             candidate is not None
@@ -206,7 +267,10 @@ class PossessionTracker:
             self._candidate = None
             self._candidate_count = 0
             self._candidate_has_motion_evidence = False
-            if self._owner is not None:
+            if (
+                self._owner is not None
+                and self._ball_unseen <= self.maximum_unseen_possession_frames
+            ):
                 inferred_confidence = max(
                     self.minimum_inferred_confidence,
                     self.inferred_confidence_decay ** self._missing,
@@ -217,10 +281,29 @@ class PossessionTracker:
                     self._owner,
                     inferred_confidence,
                 )
+            if (
+                self._owner is not None
+                and self._ball_unseen > self.maximum_unseen_possession_frames
+            ):
+                # De bal is werkelijk buiten beeld in plaats van kort
+                # afgedekt. Pauzeer de bezitsteller en begin bij de volgende
+                # zichtbare controle opnieuw, zodat ontbrekend beeld nooit
+                # fictief teambezit, een pass of balverlies oplevert.
+                self._owner = None
+                self._owner_key = None
+                self._candidate_key = None
+                self._candidate = None
+                self._candidate_count = 0
+                self._candidate_has_motion_evidence = False
+                self._last_change_frame = None
             return _observation(frame_number, state, None, confidence)
 
         self._missing = 0
         if key == self._owner_key:
+            # Bewaar steeds de actuele box en het actuele voetpunt. Anders
+            # vergelijkt een latere trackwissel met de plek waar het bezit
+            # ooit begon in plaats van met de laatste zichtbare positie.
+            self._owner = candidate
             self._candidate_key = None
             self._candidate_count = 0
             self._candidate_has_motion_evidence = False
@@ -229,10 +312,21 @@ class PossessionTracker:
             self._candidate_key = key
             self._candidate = candidate
             self._candidate_count = 1
-            self._candidate_has_motion_evidence = self._has_recent_motion_evidence()
+            self._candidate_has_motion_evidence = (
+                self._current_motion_evidence
+                if self._owner is not None
+                and candidate.team != self._owner.team
+                else self._has_recent_motion_evidence()
+            )
         else:
             self._candidate_count += 1
-            self._candidate_has_motion_evidence |= self._has_recent_motion_evidence()
+            self._candidate_has_motion_evidence |= (
+                self._current_motion_evidence
+                if self._owner is not None
+                and self._candidate is not None
+                and self._candidate.team != self._owner.team
+                else self._has_recent_motion_evidence()
+            )
         required_frames = self.confirmation_frames
         if (
             self._owner is not None
@@ -240,9 +334,38 @@ class PossessionTracker:
             and self._candidate.team != self._owner.team
         ):
             required_frames = self.opponent_confirmation_frames
-        has_control_evidence = (
-            self._candidate_has_motion_evidence
-            or self._candidate_count >= self.dwell_control_frames
+        is_opponent_transfer = (
+            self._owner is not None
+            and self._candidate is not None
+            and self._candidate.team != self._owner.team
+        )
+        one_touch_teammate_reception = (
+            self._owner is not None
+            and self._candidate is not None
+            and self._candidate.team == self._owner.team
+            and ball is not None
+            and ball.source == "detected"
+            and ball.confidence >= 0.15
+            and normalized_distance <= self.teammate_control_radius
+            and (
+                self._current_motion_evidence
+                or missing_before_candidate >= self.long_travel_reception_frames
+            )
+            and _is_in_ground_contact_zone(
+                ball,
+                self._candidate,
+                self.teammate_reception_ground_zone_ratio,
+            )
+        )
+        if one_touch_teammate_reception:
+            required_frames = 1
+        # Een bal die langs een tegenstander rolt mag niet uitsluitend door
+        # nabijheid en verstreken tijd bezit worden. Voor een teamwissel is
+        # werkelijk balgedrag nodig dat op controle wijst. Een ploeggenoot kan
+        # daarnaast via stabiele nabijheid een pass ontvangen.
+        has_control_evidence = self._candidate_has_motion_evidence or (
+            not is_opponent_transfer
+            and self._candidate_count >= self.dwell_control_frames
         )
         if self._candidate_count < required_frames or not has_control_evidence:
             if self._owner is not None:
@@ -269,9 +392,22 @@ class PossessionTracker:
             and _entity_key(previous) != _entity_key(self._owner)
         ):
             start_frame = previous_change if previous_change is not None else frame_number
+            same_player_handover = (
+                previous.team == self._owner.team
+                and _normalized_entity_distance(previous, self._owner)
+                <= self.same_player_handover_radius
+            )
             if (
                 previous.team == self._owner.team
-                and confidence >= self.minimum_pass_confidence
+                and not same_player_handover
+                and (
+                    self._owner.identity_id is not None
+                    or one_touch_teammate_reception
+                )
+                and (
+                    confidence >= self.minimum_pass_confidence
+                    or one_touch_teammate_reception
+                )
             ):
                 self.passes.append(
                     PassEvent(
@@ -283,6 +419,8 @@ class PossessionTracker:
                         to_label=self._owner.label,
                         team=self._owner.team.value,
                         confidence=confidence,
+                        from_track_id=previous.track_id,
+                        to_track_id=self._owner.track_id,
                     )
                 )
             elif previous.team != self._owner.team:
@@ -298,6 +436,8 @@ class PossessionTracker:
                         to_team=self._owner.team.value,
                         event_type="possession_change",
                         confidence=confidence,
+                        from_track_id=previous.track_id,
+                        to_track_id=self._owner.track_id,
                     )
                 )
         return _observation(frame_number, PossessionState.CONTROLLED, self._owner, confidence)
@@ -309,7 +449,7 @@ class PossessionTracker:
             self._motion_evidence_age += 1
             if self._motion_evidence_age > self.motion_evidence_memory_frames:
                 self._motion_evidence_age = None
-        if ball is None or ball.source not in {"detected", "interpolated", "predicted"}:
+        if ball is None or ball.source not in {"detected", "interpolated", "predicted", "stationary_hold"}:
             return
 
         self._ball_centers.append(np.asarray(ball.center, dtype=np.float64))
@@ -368,7 +508,7 @@ def _nearest_candidate(
     ball: BallObservation | None,
     entities: list[TimelineEntity],
 ) -> tuple[TimelineEntity | None, PossessionState, float, float]:
-    if ball is None or ball.source not in {"detected", "interpolated", "predicted"}:
+    if ball is None or ball.source not in {"detected", "interpolated", "predicted", "stationary_hold"}:
         return None, PossessionState.UNKNOWN, 0.0, float("inf")
     if ball.source == "predicted" and ball.confidence < 0.15:
         return None, PossessionState.UNKNOWN, 0.0, float("inf")
@@ -409,10 +549,64 @@ def _is_in_ground_contact_zone(
     return vertical_gap <= maximum_height_ratio * height
 
 
-def _entity_key(entity: TimelineEntity | None) -> tuple[int | None, int] | None:
+def _entity_key(
+    entity: TimelineEntity | None,
+) -> tuple[int | None, int, str] | None:
     if entity is None:
         return None
-    return (entity.identity_id, entity.track_id if entity.identity_id is None else -1)
+    return (
+        entity.identity_id,
+        entity.track_id if entity.identity_id is None else -1,
+        entity.team.value,
+    )
+
+
+def _current_entity(
+    key: tuple[int | None, int, str] | None,
+    entities: list[TimelineEntity],
+) -> TimelineEntity | None:
+    if key is None:
+        return None
+    return next((entity for entity in entities if _entity_key(entity) == key), None)
+
+
+def _normalized_ball_distance(
+    ball: BallObservation | None,
+    entity: TimelineEntity | None,
+) -> float:
+    if ball is None or entity is None:
+        return float("inf")
+    height = max(entity.box[3] - entity.box[1], 1.0)
+    distance = float(
+        np.linalg.norm(
+            np.asarray(ball.center, dtype=np.float64)
+            - np.asarray(entity.footpoint, dtype=np.float64)
+        )
+    )
+    return distance / max(30.0, 0.55 * height)
+
+
+def _normalized_entity_distance(
+    first: TimelineEntity,
+    second: TimelineEntity,
+) -> float:
+    """Compare two player observations using their ground contact points.
+
+    A tracker can assign a new technical ID after overlap or occlusion. When
+    both observations occupy effectively the same physical position, the
+    change is an identity handover and cannot represent a football pass.
+    """
+
+    first_height = max(first.box[3] - first.box[1], 1.0)
+    second_height = max(second.box[3] - second.box[1], 1.0)
+    scale = max(30.0, 0.55 * max(first_height, second_height))
+    distance = float(
+        np.linalg.norm(
+            np.asarray(first.footpoint, dtype=np.float64)
+            - np.asarray(second.footpoint, dtype=np.float64)
+        )
+    )
+    return distance / scale
 
 
 def _observation(frame: int, state: PossessionState, entity: TimelineEntity | None, confidence: float) -> PossessionObservation:
@@ -434,16 +628,23 @@ def save_possession_report(
     observations: list[PossessionObservation],
     passes: list[PassEvent],
     turnovers: list[TurnoverEvent] | None = None,
+    timeline_metadata: dict | None = None,
+    timeline_events: list[dict] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "schema_version": 2,
+        "schema_version": 4,
         "source_video": source_video,
         "fps": fps,
-        "statistics": build_possession_statistics(observations, fps),
+        "timeline_engine": timeline_metadata or {"name": "frame_tracker"},
+        "statistics": {
+            **build_possession_statistics(observations, fps),
+            "events": build_event_statistics(passes, turnovers or []),
+        },
         "observations": [item.to_dict() for item in observations],
         "passes": [item.to_dict() for item in passes],
         "turnovers": [item.to_dict() for item in (turnovers or [])],
+        "timeline_events": timeline_events or [],
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -501,3 +702,75 @@ def build_possession_statistics(
                 stats["inferred_frames"] / total if total else 0.0
             )
     return {"teams": teams, "players": players}
+
+
+def build_event_statistics(
+    passes: list[PassEvent],
+    turnovers: list[TurnoverEvent],
+) -> dict:
+    """Summarise match events and credit interceptions to the defending team."""
+
+    teams: dict[str, dict[str, int]] = {}
+    players: dict[str, dict[str, int | str]] = {}
+
+    def team_stats(team: str) -> dict[str, int]:
+        return teams.setdefault(
+            team,
+            {
+                "successful_passes": 0,
+                "failed_passes": 0,
+                "possession_losses": 0,
+                "interceptions": 0,
+            },
+        )
+
+    def player_stats(identity_id: int | None, label: str, team: str) -> dict[str, int | str]:
+        key = str(identity_id) if identity_id is not None else f"label:{label}"
+        return players.setdefault(
+            key,
+            {
+                "label": label,
+                "team": team,
+                "passes_completed": 0,
+                "passes_received": 0,
+                "failed_passes": 0,
+                "possession_losses": 0,
+                "interceptions": 0,
+            },
+        )
+
+    for event in passes:
+        team_stats(event.team)["successful_passes"] += 1
+        player_stats(event.from_identity_id, event.from_label, event.team)[
+            "passes_completed"
+        ] += 1
+        player_stats(event.to_identity_id, event.to_label, event.team)[
+            "passes_received"
+        ] += 1
+
+    for event in turnovers:
+        losing_team = team_stats(event.from_team)
+        losing_team["possession_losses"] += 1
+        player_stats(event.from_identity_id, event.from_label, event.from_team)[
+            "possession_losses"
+        ] += 1
+        if event.event_type != "intercepted_pass":
+            continue
+        losing_team["failed_passes"] += 1
+        team_stats(event.to_team)["interceptions"] += 1
+        player_stats(event.from_identity_id, event.from_label, event.from_team)[
+            "failed_passes"
+        ] += 1
+        player_stats(event.to_identity_id, event.to_label, event.to_team)[
+            "interceptions"
+        ] += 1
+
+    return {
+        "successful_passes": len(passes),
+        "possession_losses": len(turnovers),
+        "interceptions": sum(
+            event.event_type == "intercepted_pass" for event in turnovers
+        ),
+        "teams": teams,
+        "players": players,
+    }

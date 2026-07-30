@@ -15,7 +15,8 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from football_ai.analysis.entity_timeline import load_entity_timeline
+from football_ai.analysis.entity_timeline import apply_team_roster, load_entity_timeline
+from football_ai.analysis.match_timeline import MatchTimelineEngine
 from football_ai.analysis.possession import (
     PossessionState,
     PossessionTracker,
@@ -23,8 +24,10 @@ from football_ai.analysis.possession import (
     should_render_inferred_ball,
 )
 from football_ai.detection.ball_tracking import BallObservation
+from football_ai.visualizer import draw_ball_observation
+from football_ai.tracking.entity_roster import load_team_roster
 from football_ai.visualization.tactical_map import (
-    CameraRelativeProjector,
+    GoalkeeperAnchoredProjector,
     TacticalMapRenderer,
     TeamHeatmapAccumulator,
 )
@@ -33,6 +36,12 @@ from football_ai.visualization.tactical_map import (
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyseer voorzichtig balbezit en mogelijke passes.")
     parser.add_argument("--video", required=True, help="Bestandsnaam in videos/ of volledig pad.")
+    parser.add_argument(
+        "--camera-height",
+        type=float,
+        default=3.75,
+        help="Geschatte camerahoogte in meters voor de tijdelijke diepteweergave (standaard: 3.75).",
+    )
     args = parser.parse_args()
     video_path = Path(args.video)
     if not video_path.is_absolute():
@@ -40,10 +49,13 @@ def main() -> None:
     prefix = video_path.stem
     entity_dir = PROJECT_ROOT / "output" / "entities"
     ball_dir = PROJECT_ROOT / "output" / "ball"
-    combined_dir = PROJECT_ROOT / "output" / "combined"
     timeline_path = entity_dir / f"{prefix}_entity_timeline.json"
     ball_path = ball_dir / f"{prefix}_ball_tracking.json"
-    base_video = combined_dir / f"{prefix}_all_detections_qa.mp4"
+    # Start vanaf de entiteitenvideo. De gecombineerde video bevat de
+    # balmarkering al ingebakken, waardoor een verworpen interpolatie naast
+    # "BAL vermoedelijk" zichtbaar bleef. Hier tekenen we bewust precies een
+    # balbron per frame.
+    base_video = entity_dir / f"{prefix}_entities_qa.mp4"
     if not timeline_path.exists():
         raise FileNotFoundError(
             f"Entiteitentijdlijn ontbreekt: {timeline_path}. Draai eerst tools/analyze_entities.py opnieuw."
@@ -51,9 +63,13 @@ def main() -> None:
     if not ball_path.exists():
         raise FileNotFoundError(f"Balrapport ontbreekt: {ball_path}. Draai eerst tools/analyze_ball.py.")
     if not base_video.exists():
-        raise FileNotFoundError(f"Gecombineerde QA-video ontbreekt: {base_video}.")
+        raise FileNotFoundError(f"Entiteitenvideo ontbreekt: {base_video}.")
 
     timeline = load_entity_timeline(timeline_path)
+    roster_path = entity_dir / f"{prefix}_team_roster.json"
+    if roster_path.exists():
+        timeline = apply_team_roster(timeline, load_team_roster(roster_path))
+        print(f"Spelersnamen worden toegepast: {roster_path}")
     entities_by_frame = {}
     for item in timeline.observations:
         entities_by_frame.setdefault(item.frame_number, []).append(item)
@@ -70,10 +86,19 @@ def main() -> None:
         max(entities_by_frame, default=-1),
         max(balls, default=-1),
     )
-    observations = [
+    raw_observations = [
         tracker.update(frame, balls.get(frame), entities_by_frame.get(frame, []))
         for frame in range(maximum_frame + 1)
     ]
+    match_timeline = MatchTimelineEngine(fps=timeline.fps).resolve(
+        raw_observations,
+        tracker.passes,
+        tracker.turnovers,
+    )
+    observations = list(match_timeline.observations)
+    passes = list(match_timeline.passes)
+    turnovers = list(match_timeline.turnovers)
+    public_team_names = _team_names(timeline.observations, observations)
 
     output_dir = PROJECT_ROOT / "output" / "analysis"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -85,8 +110,20 @@ def main() -> None:
         timeline.source_video,
         timeline.fps,
         observations,
-        tracker.passes,
-        tracker.turnovers,
+        passes,
+        turnovers,
+        timeline_metadata={
+            "name": "match_timeline",
+            "version": 2,
+            "suppressed_team_switch_frames": (
+                match_timeline.suppressed_team_switches
+            ),
+            "unknown_frames_excluded_from_possession": True,
+        },
+        timeline_events=[
+            item.to_dict(timeline.fps, public_team_names)
+            for item in match_timeline.events
+        ],
     )
     _render(
         base_video,
@@ -96,8 +133,10 @@ def main() -> None:
         observations,
         entities_by_frame,
         balls,
-        tracker.passes,
-        tracker.turnovers,
+        passes,
+        turnovers,
+        public_team_names,
+        args.camera_height,
     )
     _transcode(raw_path, output_path)
 
@@ -107,12 +146,16 @@ def main() -> None:
     print(f"Bevestigd balbezit: {controlled}/{len(observations)} frames")
     print(f"Vermoedelijk behouden bezit: {inferred}/{len(observations)} frames")
     print(f"Duel/onzeker bezit: {contested}/{len(observations)} frames")
-    print(f"Voorlopige passkandidaten: {len(tracker.passes)}")
+    print(f"Bevestigde passes in wedstrijdtijdlijn: {len(passes)}")
     intercepted = sum(
-        item.event_type == "intercepted_pass" for item in tracker.turnovers
+        item.event_type == "intercepted_pass" for item in turnovers
     )
     print(f"Onderschepte passes: {intercepted}")
-    print(f"Bevestigd balverlies: {len(tracker.turnovers)}")
+    print(f"Bevestigd balverlies: {len(turnovers)}")
+    print(
+        "Onderdrukte onbetrouwbare teamwissels: "
+        f"{match_timeline.suppressed_team_switches} frames"
+    )
     print(f"QA-video: {output_path}")
     print(f"Balbezitrapport: {report_path}")
 
@@ -127,6 +170,8 @@ def _render(
     balls,
     passes,
     turnovers,
+    team_names,
+    camera_height_m: float,
 ) -> None:
     capture = cv2.VideoCapture(str(base_video))
     if not capture.isOpened():
@@ -134,16 +179,16 @@ def _render(
     fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     writer = None
     frame_number = 0
-    team_names = _team_names(observations)
     team_frames = {team: 0 for team in team_names}
     pass_counts = {team: 0 for team in team_names}
     failed_pass_counts = {team: 0 for team in team_names}
     loss_counts = {team: 0 for team in team_names}
+    interception_counts = {team: 0 for team in team_names}
     passes_at = {item.end_frame: item for item in passes}
     turnovers_at = {item.end_frame: item for item in turnovers}
     recent_events: deque[tuple[int, str, tuple[int, int, int]]] = deque(maxlen=5)
     active_event: tuple[int, str, tuple[int, int, int]] | None = None
-    projector = CameraRelativeProjector()
+    projector = GoalkeeperAnchoredProjector(camera_height_m=camera_height_m)
     tactical_map = TacticalMapRenderer(projector)
     heatmaps = TeamHeatmapAccumulator(projector)
     source_frame_size: tuple[int, int] | None = None
@@ -155,6 +200,11 @@ def _render(
             observation = observations[frame_number]
             source_frame_size = (frame.shape[1], frame.shape[0])
             frame_entities = entities_by_frame.get(frame_number, [])
+            projector.update(frame_entities, source_frame_size)
+            raw_ball = balls.get(frame_number)
+            draw_inferred_ball = should_render_inferred_ball(observation, raw_ball)
+            if not draw_inferred_ball:
+                frame = draw_ball_observation(frame, raw_ball)
             heatmaps.add(frame_entities, source_frame_size)
             color = {
                 PossessionState.CONTROLLED: (0, 255, 0),
@@ -176,10 +226,6 @@ def _render(
                 )
                 if owner is not None:
                     point = tuple(int(round(value)) for value in owner.footpoint)
-                    draw_inferred_ball = should_render_inferred_ball(
-                        observation,
-                        balls.get(frame_number),
-                    )
                     if (
                         observation.state is PossessionState.CONTROLLED
                         or draw_inferred_ball
@@ -216,6 +262,9 @@ def _render(
                     failed_pass_counts[event.from_team] = (
                         failed_pass_counts.get(event.from_team, 0) + 1
                     )
+                    interception_counts[event.to_team] = (
+                        interception_counts.get(event.to_team, 0) + 1
+                    )
                     text = (
                         f"PASS ONDERSCHEPT: {_short_name(event.from_label)}"
                         f" > {_short_name(event.to_label)}"
@@ -246,6 +295,7 @@ def _render(
                 pass_counts,
                 failed_pass_counts,
                 loss_counts,
+                interception_counts,
                 active_event,
                 recent_events,
                 tactical_map,
@@ -268,17 +318,29 @@ def _render(
             writer.release()
     if source_frame_size is not None:
         team_a_path, team_b_path = heatmaps.save(output_dir, prefix, team_names)
-        print(f"Heatmap team A: {team_a_path}")
-        print(f"Heatmap team B: {team_b_path}")
+        print(f"Heatmap {team_names.get('team_a', 'team_a')}: {team_a_path}")
+        print(f"Heatmap {team_names.get('team_b', 'team_b')}: {team_b_path}")
 
 
-def _team_names(observations) -> dict[str, str]:
+def _team_names(*observation_groups) -> dict[str, str]:
     names: dict[str, str] = {}
-    for item in observations:
-        if item.team is None or item.label is None or item.team in names:
-            continue
-        club = item.label.split(" - ", 1)[0].strip()
-        names[item.team] = club or item.team
+    observed_teams: set[str] = set()
+    for observations in observation_groups:
+        for item in observations:
+            raw_team = getattr(item, "team", None)
+            if raw_team is None:
+                continue
+            team = str(getattr(raw_team, "value", raw_team))
+            observed_teams.add(team)
+            label = getattr(item, "label", None)
+            if label is None:
+                continue
+            club = label.split(" - ", 1)[0].strip()
+            if not club or club.lower() == "onbekend" or club.upper().startswith("ID "):
+                continue
+            names.setdefault(team, club)
+    for team in observed_teams:
+        names.setdefault(team, team)
     return names
 
 
@@ -298,6 +360,7 @@ def _draw_dashboard(
     pass_counts,
     failed_pass_counts,
     loss_counts,
+    interception_counts,
     active_event,
     recent_events,
     tactical_map,
@@ -339,8 +402,7 @@ def _draw_dashboard(
             canvas,
             (
                 f"Passes {pass_counts.get(team, 0)}   Mislukt "
-                f"{failed_pass_counts.get(team, 0)}   Balverlies "
-                f"{loss_counts.get(team, 0)}"
+                f"{failed_pass_counts.get(team, 0)}"
             ),
             (left, y + 54),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -349,7 +411,20 @@ def _draw_dashboard(
             1,
             cv2.LINE_AA,
         )
-        y += 78
+        cv2.putText(
+            canvas,
+            (
+                f"Onderscheppingen {interception_counts.get(team, 0)}   "
+                f"Balverlies {loss_counts.get(team, 0)}"
+            ),
+            (left, y + 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (205, 215, 205),
+            1,
+            cv2.LINE_AA,
+        )
+        y += 99
 
     map_top = y + 22
     map_bottom = min(canvas.shape[0] - 142, map_top + max(150, int(round(width * 0.54))))
@@ -378,7 +453,7 @@ def _draw_dashboard(
         cv2.putText(canvas, f"{stamp}  {event_text[:31]}", (left, y), cv2.FONT_HERSHEY_SIMPLEX, 0.43, event_color, 1, cv2.LINE_AA)
         y += 24
 
-    cv2.putText(canvas, "Kaart/heatmaps zijn nog camera-relatief", (left, canvas.shape[0] - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (155, 175, 155), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "Kaart/heatmaps: keeper-verankerde schatting", (left, canvas.shape[0] - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (155, 175, 155), 1, cv2.LINE_AA)
 
 
 def _transcode(raw_path: Path, output_path: Path) -> None:

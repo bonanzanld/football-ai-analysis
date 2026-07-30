@@ -195,7 +195,7 @@ def build_entity_identities(
     for link in links:
         root_a, root_b = find(link.track_id_a), find(link.track_id_b)
         decision = link.decision
-        if root_a != root_b and decision == "auto_merge":
+        if root_a != root_b and decision in {"auto_merge", "auto_merge_team_repair"}:
             combined = members(root_a) | members(root_b)
             if _group_has_overlap(combined, tracks):
                 decision = "rejected_overlap"
@@ -295,8 +295,7 @@ def _score_link(
     frame_height: float,
     gap: int,
 ) -> IdentityLink | None:
-    if not _assignments_compatible(first, second, corrections):
-        return None
+    assignments_compatible = _assignments_compatible(first, second, corrections)
     last = max(first.observations, key=lambda item: item.frame_number)
     earliest = min(second.observations, key=lambda item: item.frame_number)
     center_a, height_a = _box_geometry(last)
@@ -320,9 +319,24 @@ def _score_link(
     temporal_score = max(0.0, 1.0 - gap / max(1.0, 2.0 * 30.0))
     score = 0.50 * position_score + 0.25 * appearance + 0.15 * size_score + 0.10 * temporal_score
     strong_continuity = normalized_distance <= 1.8 and size_score >= 0.65
+    team_repair_continuity = (
+        gap <= 5
+        and normalized_distance <= 1.0
+        and size_score >= 0.65
+        and appearance >= 0.80
+    )
+    if not assignments_compatible and not team_repair_continuity:
+        return None
     if score < 0.68 or normalized_distance > 3.0 or size_score < 0.50:
         return None
-    decision = "auto_merge" if score >= 0.82 and strong_continuity and appearance >= 0.55 else "candidate"
+    if not assignments_compatible:
+        decision = "auto_merge_team_repair"
+    else:
+        decision = (
+            "auto_merge"
+            if score >= 0.82 and strong_continuity and appearance >= 0.55
+            else "candidate"
+        )
     return IdentityLink(
         first.track_id,
         second.track_id,
@@ -422,8 +436,30 @@ def _group_assignment(
     manual = [corrections.get(item.track_id) for item in tracks] if corrections else []
     manual = [item for item in manual if item is not None]
     if manual:
-        team = manual[0].team if all(item.team == manual[0].team for item in manual) else TeamAssignment.UNKNOWN
         role = manual[0].role if all(item.role == manual[0].role for item in manual) else EntityRole.UNKNOWN
+        if all(item.team == manual[0].team for item in manual):
+            team = manual[0].team
+        else:
+            # Een zeer kort, fout gekleurd fragment kan na een occlusie direct
+            # overgaan in een lange en stabiele track van dezelfde persoon.
+            # De streng gecontroleerde koppeling is dan sterker bewijs voor de
+            # identiteit dan de losse handmatige keuze op dat korte fragment.
+            dominant = max(tracks, key=lambda item: item.frames_seen)
+            alternatives = [item.frames_seen for item in tracks if item is not dominant]
+            clearly_dominant = (
+                alternatives
+                and dominant.frames_seen >= 3 * max(alternatives)
+                and dominant.team_is_reliable
+                and dominant.team_agreement_ratio >= 0.90
+            )
+            if clearly_dominant and dominant.final_team_id in (0, 1):
+                team = (
+                    TeamAssignment.TEAM_A
+                    if dominant.final_team_id == 0
+                    else TeamAssignment.TEAM_B
+                )
+            else:
+                team = TeamAssignment.UNKNOWN
         return team, role
     reliable = [item.final_team_id for item in tracks if item.team_is_reliable]
     if reliable and all(item == reliable[0] for item in reliable):

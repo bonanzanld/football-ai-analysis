@@ -24,6 +24,7 @@ from football_ai.tracking.entity_corrections import (
     TeamAssignment,
 )
 from football_ai.tracking.entity_identity import EntityIdentitySet
+from football_ai.tracking.entity_roster import TeamRoster
 from football_ai.tracking.track_segmentation import (
     TeamEvidence,
     TrackSegmentation,
@@ -37,6 +38,7 @@ from football_ai.tracking.entity_review_manifest import (
 )
 from football_ai.visualizer import draw_resolved_track_boxes, draw_tracked_players
 from football_ai.analysis.entity_timeline import build_entity_timeline, save_entity_timeline
+from football_ai.tracking.box_interpolation import observations_with_short_gaps
 
 
 class VideoProcessor:
@@ -59,6 +61,7 @@ class VideoProcessor:
         debug_panel_height: int = 720,
         entity_corrections: EntityCorrectionSet | None = None,
         entity_identities: EntityIdentitySet | None = None,
+        team_roster: TeamRoster | None = None,
     ) -> None:
         self.detector = detector
         self.pitch_calibration = pitch_calibration
@@ -84,6 +87,7 @@ class VideoProcessor:
 
         self.entity_resolver = EntityResolver(entity_corrections)
         self.entity_identities = entity_identities
+        self.team_roster = team_roster
 
     def process(
         self,
@@ -329,6 +333,10 @@ class VideoProcessor:
                     if result.team_id is not None
                 },
             )
+            if self.team_roster is not None:
+                from football_ai.analysis.entity_timeline import apply_team_roster
+
+                timeline = apply_team_roster(timeline, self.team_roster)
             save_entity_timeline(timeline, entity_timeline_path)
             print(f"Entiteitentijdlijn: {entity_timeline_path}")
 
@@ -345,11 +353,7 @@ class VideoProcessor:
     ) -> dict[int, TrackSegmentation]:
         observations: dict[int, dict[int, tuple[float, float, float, float]]] = {}
         for track in tracks:
-            for observed_frame, box in zip(
-                track.observation_frames,
-                track.boxes,
-                strict=True,
-            ):
+            for observed_frame, box in observations_with_short_gaps(track):
                 observations.setdefault(observed_frame, {})[track.track_id] = box
 
         final_teams = {
@@ -376,7 +380,7 @@ class VideoProcessor:
         if self.entity_identities is not None:
             for identity in self.entity_identities.identities:
                 for track_id in identity.track_ids:
-                    identity_labels[track_id] = identity.label
+                    identity_labels[track_id] = self._identity_display_label(identity)
         segment_identity_labels = self._build_segment_identity_labels(
             tracks=tracks,
             segmentations=segmentations,
@@ -423,7 +427,9 @@ class VideoProcessor:
                             )
                             expected_team = self._identity_team_id(identity)
                             if expected_team == segment.team_id and segment.index == 1:
-                                current_identity_labels[track_id] = identity.label
+                                current_identity_labels[track_id] = self._identity_display_label(
+                                    identity
+                                )
                         continue
                     consensus = consensus_results.get(track_id)
                     if consensus is None or consensus.is_reliable:
@@ -566,10 +572,24 @@ class VideoProcessor:
                             frame_gap,
                         )
                         if score <= 1.35 and (best is None or score < best[0]):
-                            best = (score, identity.label)
+                            best = (score, self._identity_display_label(identity))
                 if best is not None:
                     labels[(track_id, segment.index)] = best[1]
         return labels
+
+    def _identity_display_label(self, identity: Any) -> str:
+        """Use a real name only for identities belonging to the user's team."""
+
+        if (
+            self.team_roster is None
+            or identity is None
+            or identity.team is not self.team_roster.own_team
+        ):
+            return identity.label
+        player = self.team_roster.display_label(identity.identity_id, "")
+        if not player:
+            return identity.label
+        return f"{self.team_roster.own_team_name} - {player}"
 
     @staticmethod
     def _box_nearest_frame(

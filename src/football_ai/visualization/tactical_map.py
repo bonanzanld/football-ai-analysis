@@ -54,6 +54,82 @@ class CameraRelativeProjector:
         return MapPoint(x, y)
 
 
+@dataclass
+class GoalkeeperAnchoredProjector:
+    """Tijdelijke, niet-metrische kaart die zichtbare keepers als doelanker gebruikt.
+
+    De omzetting bewaart de volgorde van alle beeldpunten. Een keeper links of
+    rechts in beeld wordt nabij het bijbehorende doel geplaatst; zijn diepte
+    wordt rond het midden van dat doel verankerd. Zonder zichtbare keeper valt
+    de projector terug op de gewone camera-relatieve omzetting.
+    """
+
+    camera_height_m: float = 3.75
+    goal_offset: float = 0.055
+    goal_center_y: float = 0.50
+    name: str = "keeper-verankerd (geschat)"
+    metric: bool = False
+
+    def __post_init__(self) -> None:
+        # De hoogte is alleen een grove diepte-prior. Zonder lens- en
+        # camerahoekkalibratie mag deze omzetting nadrukkelijk niet metrisch
+        # worden geïnterpreteerd.
+        exponent = float(np.clip(1.0 + 0.06 * self.camera_height_m, 1.12, 1.35))
+        self._fallback = CameraRelativeProjector(depth_exponent=exponent)
+        self._horizontal_anchors: tuple[tuple[float, float], ...] = ()
+        self._depth_anchor: tuple[float, float] | None = None
+
+    @property
+    def anchored(self) -> bool:
+        return bool(self._horizontal_anchors)
+
+    def update(
+        self,
+        entities: Sequence[TimelineEntity],
+        frame_size: tuple[int, int],
+    ) -> None:
+        """Gebruik uitsluitend keepers die in het huidige frame zichtbaar zijn."""
+
+        width, _ = frame_size
+        keepers = [item for item in entities if item.role is EntityRole.GOALKEEPER]
+        if not keepers:
+            self._horizontal_anchors = ()
+            self._depth_anchor = None
+            return
+
+        normalized = sorted(
+            (
+                float(np.clip(item.footpoint[0] / max(width, 1), 0.0, 1.0)),
+                self._fallback.project(item.footpoint, frame_size).y,
+            )
+            for item in keepers
+        )
+        left = [item for item in normalized if item[0] < 0.5]
+        right = [item for item in normalized if item[0] >= 0.5]
+        anchors: list[tuple[float, float]] = []
+        if left:
+            anchors.append((min(left, key=lambda item: item[0])[0], self.goal_offset))
+        if right:
+            anchors.append((max(right, key=lambda item: item[0])[0], 1.0 - self.goal_offset))
+        self._horizontal_anchors = tuple(sorted(anchors))
+        self._depth_anchor = (
+            float(np.median([item[1] for item in normalized])),
+            self.goal_center_y,
+        )
+
+    def project(self, point: tuple[float, float], frame_size: tuple[int, int]) -> MapPoint:
+        raw = self._fallback.project(point, frame_size)
+        if not self.anchored:
+            return raw
+        x = _piecewise_anchor(raw.x, self._horizontal_anchors)
+        y = (
+            _piecewise_anchor(raw.y, (self._depth_anchor,))
+            if self._depth_anchor is not None
+            else raw.y
+        )
+        return MapPoint(x, y)
+
+
 class TacticalMapRenderer:
     def __init__(self, projector: CoordinateProjector, trail_length: int = 18) -> None:
         self.projector = projector
@@ -74,7 +150,7 @@ class TacticalMapRenderer:
         _draw_pitch(canvas, rect)
         cv2.putText(
             canvas,
-            "2D CAMERA-RELATIEF (NIET METRISCH)",
+            f"2D {self.projector.name.upper()}",
             (x1, max(18, y1 - 9)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.40,
@@ -182,8 +258,26 @@ class TeamHeatmapAccumulator:
             image[rect[1]:rect[3], rect[0]:rect[2]] = np.uint8(roi * (1.0 - alpha) + colored * alpha)
             _draw_pitch(image, rect, lines_only=True)
         cv2.putText(image, f"HEATMAP {name}"[:48], (55, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.90, TEAM_COLORS[team], 2, cv2.LINE_AA)
-        cv2.putText(image, "Camera-relatieve spreiding - nog niet metrisch", (55, 73), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (205, 220, 205), 1, cv2.LINE_AA)
+        cv2.putText(image, f"{self.projector.name.capitalize()} - niet metrisch", (55, 73), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (205, 220, 205), 1, cv2.LINE_AA)
         return image
+
+
+def _piecewise_anchor(
+    value: float,
+    anchors: Sequence[tuple[float, float]],
+) -> float:
+    """Monotone stukgewijze lineaire omzetting door opgegeven ankerpunten."""
+
+    points = [(0.0, 0.0), *sorted(anchors), (1.0, 1.0)]
+    value = float(np.clip(value, 0.0, 1.0))
+    for (source_a, target_a), (source_b, target_b) in zip(points, points[1:]):
+        if value <= source_b:
+            span = source_b - source_a
+            if span <= 1e-9:
+                return float(np.clip(target_b, 0.0, 1.0))
+            ratio = (value - source_a) / span
+            return float(np.clip(target_a + ratio * (target_b - target_a), 0.0, 1.0))
+    return 1.0
 
 
 def _map_pixel(point: MapPoint, rect: tuple[int, int, int, int]) -> tuple[int, int]:

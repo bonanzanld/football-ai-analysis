@@ -143,6 +143,10 @@ def main() -> None:
         acquisition_confidence=0.50,
         strong_reacquisition_confidence=0.55,
         supporting_confidence=0.15,
+        # RF-DETR ziet de verre bal bij voetcontact geregeld met slechts
+        # 5-15% confidence. Zo'n hit wordt alleen na drie consistente frames
+        # bij spelersvoeten een nieuw fysiek anker.
+        weak_reacquisition_confidence=args.threshold,
         weak_support_radius_pixels=35.0,
         # Een kleine bal op afstand mag ongeveer één seconde lang met zwakke,
         # maar baan-consistente detecties zichtbaar blijven. Die detecties

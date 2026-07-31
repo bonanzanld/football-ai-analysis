@@ -67,6 +67,7 @@ class BallTracker:
         stationary_motion_pixels: float = 12.0,
         stationary_lock_radius_pixels: float = 35.0,
         reacquisition_confirmation_frames: int = 3,
+        weak_reacquisition_confidence: float | None = None,
     ) -> None:
         if maximum_gap_frames < 0:
             raise ValueError("maximum_gap_frames must be non-negative")
@@ -116,12 +117,18 @@ class BallTracker:
             2,
             int(reacquisition_confirmation_frames),
         )
+        self.weak_reacquisition_confidence = float(
+            supporting_confidence
+            if weak_reacquisition_confidence is None
+            else weak_reacquisition_confidence
+        )
         self._observations: list[BallObservation] = []
         self._detected_observations: list[BallObservation] = []
         self._missed_frames = 0
         self._trajectory_support_frames = 0
         self._player_activity_support_frames = 0
         self._pending_reacquisition: tuple[int, BallCandidate, int] | None = None
+        self._confirmed_weak_reacquisition = False
 
     @property
     def observations(self) -> tuple[BallObservation, ...]:
@@ -157,7 +164,12 @@ class BallTracker:
         if selected is not None:
             self._player_activity_support_frames = 0
             self._pending_reacquisition = None
-            if selected.confidence < self.acquisition_confidence:
+            confirmed_weak_reacquisition = self._confirmed_weak_reacquisition
+            self._confirmed_weak_reacquisition = False
+            if (
+                selected.confidence < self.acquisition_confidence
+                and not confirmed_weak_reacquisition
+            ):
                 # Een kandidaat onder de zelfstandige detectiedrempel mag een
                 # bestaand traject alleen ondersteunen. Hij mag de fysieke
                 # balpositie niet verplaatsen en wordt nooit een nieuw anker.
@@ -353,7 +365,13 @@ class BallTracker:
                     <= radius
                 ]
                 if not nearby:
-                    return None
+                    return self._confirm_weak_reacquisition(
+                        candidates,
+                        frame_number,
+                        player_footpoints,
+                        last.center,
+                        radius,
+                    )
                 expected_center = self._predict_center(frame_number) or last.center
                 return self._best_continuation(nearby, expected_center, radius)
 
@@ -417,6 +435,83 @@ class BallTracker:
             )
             scored.append((score, candidate))
         return max(scored, key=lambda item: item[0])[1] if scored else None
+
+    def _confirm_weak_reacquisition(
+        self,
+        candidates: list[BallCandidate],
+        frame_number: int,
+        player_footpoints: tuple[tuple[float, float], ...],
+        last_center: tuple[float, float],
+        search_radius: float,
+    ) -> BallCandidate | None:
+        """Promote only persistent weak detections near active players."""
+
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.confidence >= self.weak_reacquisition_confidence
+            and self._has_multi_player_activity(
+                candidate.center,
+                player_footpoints,
+            )
+            and float(np.linalg.norm(np.subtract(candidate.center, last_center)))
+            <= search_radius
+        ]
+        if not eligible:
+            self._pending_reacquisition = None
+            return None
+
+        pending = self._pending_reacquisition
+        if pending is None:
+            candidate = max(eligible, key=lambda item: item.confidence)
+            self._pending_reacquisition = (int(frame_number), candidate, 1)
+            return None
+
+        pending_frame, pending_candidate, confirmation_count = pending
+        continuations = [
+            candidate
+            for candidate in eligible
+            if float(
+                np.linalg.norm(
+                    np.subtract(candidate.center, pending_candidate.center)
+                )
+            )
+            <= self.reacquisition_confirmation_radius_pixels
+        ]
+        if int(frame_number) != pending_frame + 1 or not continuations:
+            candidate = max(eligible, key=lambda item: item.confidence)
+            self._pending_reacquisition = (int(frame_number), candidate, 1)
+            return None
+
+        candidate = self._best_continuation(
+            continuations,
+            pending_candidate.center,
+            self.reacquisition_confirmation_radius_pixels,
+        )
+        confirmation_count += 1
+        if confirmation_count < self.reacquisition_confirmation_frames:
+            self._pending_reacquisition = (
+                int(frame_number),
+                candidate,
+                confirmation_count,
+            )
+            return None
+
+        self._confirmed_weak_reacquisition = True
+        return candidate
+
+    def _has_multi_player_activity(
+        self,
+        center: tuple[float, float],
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> bool:
+        """Require a genuine local play cluster for a very weak new anchor."""
+        nearby_players = sum(
+            float(np.linalg.norm(np.subtract(center, footpoint)))
+            <= self.player_activity_radius_pixels
+            for footpoint in player_footpoints
+        )
+        return nearby_players >= self.minimum_activity_players
 
     def _best_continuation(
         self,

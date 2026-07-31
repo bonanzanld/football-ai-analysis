@@ -472,6 +472,82 @@ class BallTrackerTests(unittest.TestCase):
         self.assertEqual(result.source, "predicted")
         self.assertAlmostEqual(result.center[0], 15.0)
 
+    def test_persistent_weak_candidate_near_player_reacquires_track(self) -> None:
+        tracker = BallTracker(
+            maximum_gap_frames=1,
+            maximum_jump_pixels=80.0,
+            acquisition_confidence=0.50,
+            strong_reacquisition_confidence=0.55,
+            weak_reacquisition_confidence=0.05,
+            reacquisition_confirmation_frames=3,
+        )
+        tracker.update(0, [BallCandidate((95, 95, 105, 105), 0.72)])
+        tracker.update(1, [])
+        footpoints = ((130.0, 105.0), (115.0, 150.0))
+
+        first = tracker.update(
+            2, [BallCandidate((104, 95, 114, 105), 0.08)], footpoints
+        )
+        second = tracker.update(
+            3, [BallCandidate((110, 95, 120, 105), 0.09)], footpoints
+        )
+        confirmed = tracker.update(
+            4, [BallCandidate((116, 95, 126, 105), 0.07)], footpoints
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIsNotNone(confirmed)
+        self.assertEqual(confirmed.source, "detected")
+        self.assertAlmostEqual(confirmed.center[0], 121.0)
+
+    def test_weak_candidate_away_from_players_cannot_reacquire_track(self) -> None:
+        tracker = BallTracker(
+            maximum_gap_frames=1,
+            maximum_jump_pixels=80.0,
+            weak_reacquisition_confidence=0.05,
+        )
+        tracker.update(0, [BallCandidate((95, 95, 105, 105), 0.72)])
+        tracker.update(1, [])
+
+        results = [
+            tracker.update(
+                frame,
+                [BallCandidate((100 + frame, 95, 110 + frame, 105), 0.12)],
+                player_footpoints=((500.0, 500.0),),
+            )
+            for frame in range(2, 6)
+        ]
+
+        self.assertTrue(
+            all(result is None or result.source == "predicted" for result in results)
+        )
+        self.assertEqual(len(tracker._detected_observations), 1)
+
+    def test_weak_candidate_near_only_one_player_cannot_reacquire(self) -> None:
+        tracker = BallTracker(
+            maximum_gap_frames=1,
+            maximum_jump_pixels=80.0,
+            weak_reacquisition_confidence=0.05,
+            reacquisition_confirmation_frames=3,
+        )
+        tracker.update(0, [BallCandidate((95, 95, 105, 105), 0.72)])
+        tracker.update(1, [])
+
+        results = [
+            tracker.update(
+                frame,
+                [BallCandidate((100 + frame, 95, 110 + frame, 105), 0.12)],
+                player_footpoints=((120.0, 105.0),),
+            )
+            for frame in range(2, 6)
+        ]
+
+        self.assertTrue(
+            all(result is None or result.source == "predicted" for result in results)
+        )
+        self.assertEqual(len(tracker._detected_observations), 1)
+
     def test_serializes_observations(self) -> None:
         tracker = BallTracker()
         tracker.update(0, [BallCandidate((10, 10, 20, 20), 0.90)])

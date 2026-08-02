@@ -214,6 +214,32 @@ Predicted observations are deliberately excluded, so this result measures
 direct anchors rather than trajectory coverage. These figures apply only to
 the reviewed problem window and are not yet whole-clip performance claims.
 
+### Dense review around the first track switch
+
+A second human review covers every frame from 370 through 410 in the same
+clip. It contains 41 reviewed frames: six with a visible active ball, eleven
+with a player-occluded ball, and 24 where the active ball is not visible. This
+dense window identifies the transition that a five-frame sample cannot show.
+
+At the 0.05 threshold, both the raw detector and the person-filtered detector
+match all 17 visible or occluded balls: 100% recall. Candidate-level precision
+remains low (1.06% raw and 1.58% after the person filter), so these candidates
+still require temporal selection.
+
+The tracker creates one correct direct anchor at frame 370, then creates false
+direct anchors on frames 379, 384, and 391 while the human annotations mark the
+active ball as not visible. Its direct-detection precision is 25.0% and recall
+is 5.9% in this dense window. By frame 387, when the real ball becomes visible
+again, the selected trajectory is already about 59 pixels away.
+
+The correct and incorrect candidates overlap in confidence, size, temporal
+persistence, and player proximity. Correct candidates range from roughly
+5.3-32.2% confidence, while the three false anchors score 7.8%, 31.6%, and
+37.4%. A confidence, size, or player-distance threshold alone therefore cannot
+fix this switch without removing genuine ball evidence. The next selection
+improvement needs an additional identity signal, or must keep ambiguous weak
+candidates as non-physical support until stronger evidence appears.
+
 ### Player and team possession magnet
 
 Ball position and possession confidence are intentionally separate. When the

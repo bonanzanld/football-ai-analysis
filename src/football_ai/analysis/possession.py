@@ -29,6 +29,7 @@ class PossessionObservation:
     label: str | None
     team: str | None
     confidence: float
+    evidence: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class PossessionObservation:
             "label": self.label,
             "team": self.team,
             "confidence": self.confidence,
+            "evidence": self.evidence,
         }
 
 
@@ -101,6 +103,7 @@ class PossessionTracker:
         synthetic_ball_override_confidence: float = 0.50,
         long_travel_reception_frames: int = 10,
         maximum_unseen_possession_frames: int = 12,
+        maximum_team_magnet_frames: int = 90,
     ) -> None:
         self.confirmation_frames = confirmation_frames
         self.opponent_confirmation_frames = max(
@@ -127,6 +130,10 @@ class PossessionTracker:
         self.maximum_unseen_possession_frames = max(
             0,
             int(maximum_unseen_possession_frames),
+        )
+        self.maximum_team_magnet_frames = max(
+            self.maximum_unseen_possession_frames,
+            int(maximum_team_magnet_frames),
         )
         self._owner_key: tuple[int | None, int, str] | None = None
         self._owner: TimelineEntity | None = None
@@ -267,6 +274,16 @@ class PossessionTracker:
             self._candidate = None
             self._candidate_count = 0
             self._candidate_has_motion_evidence = False
+            team_magnet_owner = _current_entity(self._owner_key, entities)
+            if team_magnet_owner is None and self._owner is not None:
+                team_magnet_owner = _nearby_same_team_handover(
+                    self._owner,
+                    entities,
+                    self.same_player_handover_radius,
+                )
+                if team_magnet_owner is not None:
+                    self._owner = team_magnet_owner
+                    self._owner_key = _entity_key(team_magnet_owner)
             if (
                 self._owner is not None
                 and self._ball_unseen <= self.maximum_unseen_possession_frames
@@ -280,6 +297,30 @@ class PossessionTracker:
                     PossessionState.INFERRED,
                     self._owner,
                     inferred_confidence,
+                    evidence="team_magnet" if team_magnet_owner is not None else "short_occlusion",
+                )
+            if (
+                self._owner is not None
+                and team_magnet_owner is not None
+                and self._ball_unseen <= self.maximum_team_magnet_frames
+                and team_magnet_owner.team.value in {"team_a", "team_b"}
+            ):
+                # De fysieke bal is niet zichtbaar, maar de laatst bevestigde
+                # bezitter wordt nog als dezelfde speler gevolgd. Drukte of
+                # een speler die ervoor langs loopt is op zichzelf geen bewijs
+                # van balverlies. Bewaar alleen de bezitshypothese; dit maakt
+                # geen balobservatie, pass of turnover aan.
+                self._owner = team_magnet_owner
+                inferred_confidence = max(
+                    self.minimum_inferred_confidence,
+                    self.inferred_confidence_decay ** self._missing,
+                )
+                return _observation(
+                    frame_number,
+                    PossessionState.INFERRED,
+                    self._owner,
+                    inferred_confidence,
+                    evidence="team_magnet",
                 )
             if (
                 self._owner is not None
@@ -493,13 +534,11 @@ def should_render_inferred_ball(
     ball: BallObservation | None,
     reliable_ball_confidence: float = 0.15,
 ) -> bool:
-    """Show a guessed ball marker only when no reliable real ball is visible."""
+    """Show the owner magnet only when no reliable ball path is available."""
 
     if possession.state is not PossessionState.INFERRED:
         return False
     if ball is None:
-        return True
-    if ball.source != "detected":
         return True
     return float(ball.confidence) < reliable_ball_confidence
 
@@ -609,7 +648,40 @@ def _normalized_entity_distance(
     return distance / scale
 
 
-def _observation(frame: int, state: PossessionState, entity: TimelineEntity | None, confidence: float) -> PossessionObservation:
+def _nearby_same_team_handover(
+    previous: TimelineEntity,
+    entities: list[TimelineEntity],
+    maximum_distance: float,
+) -> TimelineEntity | None:
+    """Continue an occluded owner across a nearby technical track-ID change."""
+
+    candidates = [
+        (_normalized_entity_distance(previous, entity), entity)
+        for entity in entities
+        if entity.team == previous.team
+        and entity.track_id != previous.track_id
+    ]
+    if not candidates:
+        return None
+    distance, candidate = min(candidates, key=lambda item: item[0])
+    if distance > maximum_distance:
+        return None
+    opponent_is_also_local = any(
+        entity.team.value in {"team_a", "team_b"}
+        and entity.team != previous.team
+        and _normalized_entity_distance(previous, entity) <= maximum_distance
+        for entity in entities
+    )
+    return None if opponent_is_also_local else candidate
+
+
+def _observation(
+    frame: int,
+    state: PossessionState,
+    entity: TimelineEntity | None,
+    confidence: float,
+    evidence: str | None = None,
+) -> PossessionObservation:
     return PossessionObservation(
         frame_number=frame,
         state=state,
@@ -618,6 +690,7 @@ def _observation(frame: int, state: PossessionState, entity: TimelineEntity | No
         label=entity.label if entity else None,
         team=entity.team.value if entity else None,
         confidence=float(max(0.0, min(1.0, confidence))),
+        evidence=evidence,
     )
 
 

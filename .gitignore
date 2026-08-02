@@ -20,6 +20,10 @@ frames/*
 models/*
 data/raw/*
 data/processed/*
+data/ball_ground_truth/*/frames/*
+data/ball_ground_truth/*/detector_predictions.json
+data/ball_ground_truth/*/evaluation.json
+data/ball_ground_truth/*/*_evaluation.json
 
 # Keep empty folders
 !videos/.gitkeep

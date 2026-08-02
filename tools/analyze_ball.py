@@ -19,10 +19,12 @@ from football_ai.detection.ball_tracking import (
     BallCandidate,
     BallObservation,
     BallTracker,
+    best_local_search_anchor,
     candidates_from_detections,
     exclude_candidates_inside_people,
     hold_stationary_detected_gaps,
     interpolate_detected_gaps,
+    offset_ball_candidate,
     save_ball_observations,
 )
 from football_ai.detector import FootballDetector
@@ -42,6 +44,38 @@ def _candidate_to_reference(
         box=transform_box(candidate.box, current_to_reference),
         confidence=candidate.confidence,
     )
+
+
+def _local_ball_candidates(
+    detector: FootballDetector,
+    frame: np.ndarray,
+    center: tuple[float, float],
+    crop_width: int | None = None,
+    crop_height: int | None = None,
+) -> list[BallCandidate]:
+    """Run a higher-detail detector pass around the last credible ball area."""
+
+    height, width = frame.shape[:2]
+    if crop_width is None:
+        crop_width = min(1650, max(480, int(round(width * 0.55))))
+    if crop_height is None:
+        crop_height = min(850, max(320, int(round(height * 0.60))))
+    actual_width = min(width, max(1, int(crop_width)))
+    actual_height = min(height, max(1, int(crop_height)))
+    x1 = int(round(center[0] - actual_width / 2.0))
+    y1 = int(round(center[1] - actual_height / 2.0))
+    x1 = max(0, min(width - actual_width, x1))
+    y1 = max(0, min(height - actual_height, y1))
+    crop = frame[y1 : y1 + actual_height, x1 : x1 + actual_width]
+    _, _, ball_detections = detector.detect(crop)
+    return [
+        offset_ball_candidate(candidate, x1, y1)
+        for candidate in candidates_from_detections(ball_detections)
+        # In a detail crop the real ball in this 4K source spans roughly
+        # 18-23 pixels. Tiny 5-10 pixel hits are predominantly fixed field or
+        # background texture and must not reach the temporal tracker.
+        if min(candidate.size) >= 12.0
+    ]
 
 
 def _observations_to_image_space(
@@ -65,6 +99,7 @@ def _observations_to_image_space(
                 box=transform_box(observation.box, reference_to_image),
                 confidence=observation.confidence,
                 source=observation.source,
+                track_segment=observation.track_segment,
             )
         )
     return converted
@@ -97,8 +132,10 @@ def main() -> None:
     detector = FootballDetector(player_threshold=0.20, ball_threshold=args.threshold)
     frame_candidates = []
     frame_player_footpoints = []
+    frame_player_boxes = []
     frame_transforms: list[np.ndarray] = []
     camera_motion = OnlineCameraMotion()
+    local_search_center: tuple[float, float] | None = None
     frame_number = 0
 
     print("FASE 1/2 - Video analyseren en balkandidaten verzamelen")
@@ -111,7 +148,32 @@ def main() -> None:
             frame_transforms.append(current_to_reference.copy())
             _, people, ball_detections = detector.detect(frame)
             candidates = candidates_from_detections(ball_detections)
+            local_candidates: list[BallCandidate] = []
+            if local_search_center is not None:
+                local_candidates = _local_ball_candidates(
+                    detector,
+                    frame,
+                    local_search_center,
+                )
+                local_anchor = best_local_search_anchor(
+                    local_candidates,
+                    local_search_center,
+                )
+                if local_anchor is not None:
+                    local_search_center = local_anchor.center
+            candidates.extend(local_candidates)
             candidates = exclude_candidates_inside_people(candidates, people.xyxy)
+            if local_search_center is None:
+                initial_anchors = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.confidence >= 0.50
+                ]
+                if initial_anchors:
+                    local_search_center = max(
+                        initial_anchors,
+                        key=lambda candidate: candidate.confidence,
+                    ).center
             frame_candidates.append(
                 tuple(
                     _candidate_to_reference(candidate, current_to_reference)
@@ -125,6 +187,15 @@ def main() -> None:
                         current_to_reference,
                     )
                     for x1, y1, x2, y2 in people.xyxy
+                )
+            )
+            frame_player_boxes.append(
+                tuple(
+                    transform_box(
+                        tuple(float(value) for value in box),
+                        current_to_reference,
+                    )
+                    for box in people.xyxy
                 )
             )
             frame_number += 1
@@ -141,12 +212,30 @@ def main() -> None:
         maximum_jump_pixels=70.0,
         confidence_weight=0.25,
         acquisition_confidence=0.50,
-        strong_reacquisition_confidence=0.55,
+        # In de openingsboog verschijnt de echte bal na een kort gat opnieuw
+        # met 41% confidence, op vrijwel dezelfde positie als het laatst
+        # bewezen spoor. Dat is sterke trajectsteun, ook al blijft het net
+        # onder de zelfstandige acquisitiedrempel van 50%. Verre kandidaten
+        # vallen nog steeds onder de bevestigde heracquisitielogica.
+        strong_reacquisition_confidence=0.30,
         supporting_confidence=0.15,
-        # RF-DETR ziet de verre bal bij voetcontact geregeld met slechts
-        # 5-15% confidence. Zo'n hit wordt alleen na drie consistente frames
-        # bij spelersvoeten een nieuw fysiek anker.
+        # Een verre herstart onder 30% bleek op echte beelden ondanks
+        # temporele en spelerssteun nog spelershoofden en trainingskegels als
+        # bal te bevestigen. Zo'n zwakke hit mag daarom geen nieuw fysiek anker
+        # worden; lokale baansteun kan de CLI-drempel wel blijven gebruiken.
         weak_reacquisition_confidence=args.threshold,
+        remote_weak_reacquisition_confidence=max(args.threshold, 0.30),
+        remote_weak_reacquisition_after_frames=max(1, int(round(fps * 0.5))),
+        # Een verre zwakke kandidaat bij slechts een speler bleek in de
+        # referentieclip ook een stilstaand kleding-/veld-detail te kunnen
+        # zijn (o.a. de foutieve spoorwissel rond frame 104). Vereis daarom
+        # opnieuw een lokale spelsituatie met minstens twee spelers. Een
+        # sterke detectie kan nog steeds zelfstandig heracquireren.
+        weak_reacquisition_minimum_players=2,
+        # In drukke amateurbeelden is de zichtbare bal in het volledige frame
+        # soms slechts 8-12 pixels breed. Meerframe- en spelerssteun bewaken de
+        # herstart; een harde 12px-grens verwijderde de echte duelbal.
+        weak_reacquisition_minimum_size=8.0,
         weak_support_radius_pixels=35.0,
         # Een kleine bal op afstand mag ongeveer één seconde lang met zwakke,
         # maar baan-consistente detecties zichtbaar blijven. Die detecties
@@ -156,6 +245,14 @@ def main() -> None:
         # voor een bestaande balbaan. Hiervoor draait geen extra AI-model.
         player_activity_radius_pixels=90.0,
         minimum_activity_players=2,
+        # Een bewezen bal aan een spelersvoet blijft bij zwakke, verre
+        # concurrenten drie seconden leidend. Een sterke detectie of lokale
+        # voortzetting wordt hierdoor niet geblokkeerd.
+        remote_weak_player_contact_lock_frames=max(1, int(round(fps * 3.0))),
+        # Bij meerdere sterke ballen is nabijheid van het actuele spel een
+        # begrensde tie-breaker. Een duidelijk sterkere bal in vrije vlucht
+        # blijft winnen.
+        player_proximity_weight=0.25,
         maximum_player_activity_support_frames=max(1, int(round(fps * 0.75))),
         contact_speed_multiplier=1.25,
         # Tijdens een korte analyse mag een verre, nieuwe kandidaat de eenmaal
@@ -169,16 +266,17 @@ def main() -> None:
             analyzed_frame,
             candidates,
             player_footpoints=frame_player_footpoints[analyzed_frame],
+            player_boxes=frame_player_boxes[analyzed_frame],
         )
         if observation is not None:
             observations_by_frame[analyzed_frame] = observation
 
     final_observations = interpolate_detected_gaps(
         tracker.observations,
-        # Achtergrondcamouflage (bijvoorbeeld een witte bal voor een gebouw of
-        # reclamebord) kan langer duren dan een gewone spelersocclusie. Werk
-        # daarom in seconden, zodat dezelfde grens bij iedere framerate geldt.
-        maximum_gap_frames=max(1, int(round(fps * 1.5))),
+        # Een lange boogvlucht kan op bijna dezelfde beeldpositie beginnen en
+        # eindigen. Lineaire interpolatie zou de bal dan ten onrechte stil of
+        # laag door het beeld laten lopen. Beperk invulling tot korte hiaten.
+        maximum_gap_frames=max(1, int(round(fps * 0.5))),
         maximum_speed_pixels_per_frame=45.0,
     )
     final_observations = hold_stationary_detected_gaps(

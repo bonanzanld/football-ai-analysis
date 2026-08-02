@@ -31,6 +31,41 @@ class BallObservation:
     box: tuple[float, float, float, float]
     confidence: float
     source: str
+    track_segment: int = 0
+
+
+def offset_ball_candidate(
+    candidate: BallCandidate,
+    offset_x: int,
+    offset_y: int,
+) -> BallCandidate:
+    """Translate a crop-space candidate back into full-frame coordinates."""
+
+    x1, y1, x2, y2 = candidate.box
+    return BallCandidate(
+        box=(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
+        confidence=candidate.confidence,
+    )
+
+
+def best_local_search_anchor(
+    candidates: Iterable[BallCandidate],
+    previous_center: tuple[float, float],
+    maximum_distance: float = 180.0,
+    minimum_size: float = 12.0,
+) -> BallCandidate | None:
+    """Choose a detailed crop hit while rejecting tiny or distant clutter."""
+
+    eligible = [
+        candidate
+        for candidate in candidates
+        if min(candidate.size) >= minimum_size
+        and float(np.linalg.norm(np.subtract(candidate.center, previous_center)))
+        <= maximum_distance
+    ]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda candidate: candidate.confidence)
 
 
 class BallTracker:
@@ -68,6 +103,22 @@ class BallTracker:
         stationary_lock_radius_pixels: float = 35.0,
         reacquisition_confirmation_frames: int = 3,
         weak_reacquisition_confidence: float | None = None,
+        player_proximity_weight: float = 0.25,
+        early_motion_confirmation_frames: int = 3,
+        early_motion_window_frames: int = 45,
+        early_motion_radius_pixels: float = 35.0,
+        early_motion_minimum_displacement_pixels: float = 8.0,
+        maximum_player_occlusion_frames: int = 12,
+        player_occlusion_horizontal_margin_pixels: float = 18.0,
+        active_handoff_confidence: float = 0.75,
+        active_handoff_confirmation_frames: int = 3,
+        player_contact_memory_frames: int = 15,
+        remote_weak_player_contact_lock_frames: int = 15,
+        remote_weak_reacquisition_after_frames: int = 30,
+        weak_reacquisition_minimum_players: int | None = None,
+        weak_reacquisition_minimum_size: float = 0.0,
+        remote_weak_footpoint_vertical_tolerance_pixels: float = 30.0,
+        remote_weak_reacquisition_confidence: float | None = None,
     ) -> None:
         if maximum_gap_frames < 0:
             raise ValueError("maximum_gap_frames must be non-negative")
@@ -122,13 +173,81 @@ class BallTracker:
             if weak_reacquisition_confidence is None
             else weak_reacquisition_confidence
         )
+        self.player_proximity_weight = float(
+            np.clip(player_proximity_weight, 0.0, 1.0)
+        )
+        self.early_motion_confirmation_frames = max(
+            2,
+            int(early_motion_confirmation_frames),
+        )
+        self.early_motion_window_frames = max(0, int(early_motion_window_frames))
+        self.early_motion_radius_pixels = max(0.0, float(early_motion_radius_pixels))
+        self.early_motion_minimum_displacement_pixels = max(
+            0.0,
+            float(early_motion_minimum_displacement_pixels),
+        )
+        self.maximum_player_occlusion_frames = max(
+            0,
+            int(maximum_player_occlusion_frames),
+        )
+        self.player_occlusion_horizontal_margin_pixels = max(
+            0.0,
+            float(player_occlusion_horizontal_margin_pixels),
+        )
+        self.active_handoff_confidence = float(active_handoff_confidence)
+        self.active_handoff_confirmation_frames = max(
+            2,
+            int(active_handoff_confirmation_frames),
+        )
+        self.player_contact_memory_frames = max(
+            0,
+            int(player_contact_memory_frames),
+        )
+        self.remote_weak_player_contact_lock_frames = max(
+            0,
+            int(remote_weak_player_contact_lock_frames),
+        )
+        self.remote_weak_reacquisition_after_frames = max(
+            0,
+            int(remote_weak_reacquisition_after_frames),
+        )
+        self.weak_reacquisition_minimum_players = max(
+            1,
+            self.minimum_activity_players
+            if weak_reacquisition_minimum_players is None
+            else int(weak_reacquisition_minimum_players),
+        )
+        self.weak_reacquisition_minimum_size = max(
+            0.0,
+            float(weak_reacquisition_minimum_size),
+        )
+        self.remote_weak_footpoint_vertical_tolerance_pixels = max(
+            0.0,
+            float(remote_weak_footpoint_vertical_tolerance_pixels),
+        )
+        self.remote_weak_reacquisition_confidence = float(
+            self.weak_reacquisition_confidence
+            if remote_weak_reacquisition_confidence is None
+            else remote_weak_reacquisition_confidence
+        )
         self._observations: list[BallObservation] = []
         self._detected_observations: list[BallObservation] = []
         self._missed_frames = 0
         self._trajectory_support_frames = 0
         self._player_activity_support_frames = 0
+        self._player_occlusion_support_frames = 0
         self._pending_reacquisition: tuple[int, BallCandidate, int] | None = None
         self._confirmed_weak_reacquisition = False
+        self._confirmed_remote_weak_reacquisition = False
+        self._bootstrap_contact_confirmed = False
+        self._pending_early_motion: (
+            tuple[int, BallCandidate, BallCandidate, int] | None
+        ) = None
+        self._early_motion_active_until_frame: int | None = None
+        self._pending_active_handoff: tuple[int, BallCandidate, int] | None = None
+        self._confirmed_active_handoff = False
+        self._track_segment = 0
+        self._last_player_contact_frame: int | None = None
 
     @property
     def observations(self) -> tuple[BallObservation, ...]:
@@ -139,6 +258,7 @@ class BallTracker:
         frame_number: int,
         candidates: Iterable[BallCandidate],
         player_footpoints: Iterable[tuple[float, float]] = (),
+        player_boxes: Iterable[tuple[float, float, float, float]] = (),
     ) -> BallObservation | None:
         valid = [candidate for candidate in candidates if self._is_valid(candidate)]
         if not self._observations:
@@ -148,6 +268,7 @@ class BallTracker:
                 if candidate.confidence >= self.acquisition_confidence
             ]
         footpoints = tuple(player_footpoints)
+        boxes = tuple(tuple(float(value) for value in box) for box in player_boxes)
         trajectory_center = self._predict_center(frame_number)
         predicted_center = (
             None
@@ -163,12 +284,29 @@ class BallTracker:
 
         if selected is not None:
             self._player_activity_support_frames = 0
+            self._player_occlusion_support_frames = 0
             self._pending_reacquisition = None
             confirmed_weak_reacquisition = self._confirmed_weak_reacquisition
             self._confirmed_weak_reacquisition = False
+            confirmed_remote_weak_reacquisition = (
+                self._confirmed_remote_weak_reacquisition
+            )
+            self._confirmed_remote_weak_reacquisition = False
+            confirmed_active_handoff = self._confirmed_active_handoff
+            self._confirmed_active_handoff = False
+            confirmed_early_motion = (
+                self._early_motion_active_until_frame is not None
+                and int(frame_number) <= self._early_motion_active_until_frame
+                and selected.confidence >= self.weak_reacquisition_confidence
+            )
             if (
-                selected.confidence < self.acquisition_confidence
+                selected.confidence
+                < min(
+                    self.acquisition_confidence,
+                    self.strong_reacquisition_confidence,
+                )
                 and not confirmed_weak_reacquisition
+                and not confirmed_early_motion
             ):
                 # Een kandidaat onder de zelfstandige detectiedrempel mag een
                 # bestaand traject alleen ondersteunen. Hij mag de fysieke
@@ -237,18 +375,45 @@ class BallTracker:
                     ),
                     confidence=predicted_confidence,
                     source="predicted",
+                    track_segment=self._track_segment,
                 )
                 self._observations.append(observation)
                 return observation
+            if confirmed_active_handoff or confirmed_remote_weak_reacquisition:
+                # Dit is een bewust bevestigde wissel naar de actieve
+                # spelsituatie, of een verre zwakke herstart na langdurig
+                # verlies. Oude snelheids- en stilstandshistorie hoort niet
+                # bij het nieuwe fysieke spoor en interpolatie mag beide
+                # situaties niet met een kunstmatige balbaan verbinden.
+                self._detected_observations.clear()
+                self._bootstrap_contact_confirmed = False
+                self._pending_early_motion = None
+                self._early_motion_active_until_frame = None
+                self._track_segment += 1
             observation = BallObservation(
                 frame_number=int(frame_number),
                 center=selected.center,
                 box=selected.box,
                 confidence=float(selected.confidence),
                 source="detected",
+                track_segment=self._track_segment,
             )
             self._observations.append(observation)
             self._detected_observations.append(observation)
+            if self._near_player_contact(observation.center, footpoints):
+                self._last_player_contact_frame = int(frame_number)
+            if len(self._detected_observations) == 1:
+                # Detector boxes do not always extend to the planted foot. A
+                # slightly wider activity radius still proves that the first
+                # ball anchor belongs to the local play, without changing the
+                # stricter contact radius used by normal trajectory physics.
+                self._bootstrap_contact_confirmed = any(
+                    float(np.linalg.norm(np.subtract(observation.center, footpoint)))
+                    <= self.player_activity_radius_pixels
+                    for footpoint in footpoints
+                )
+            else:
+                self._pending_early_motion = None
             self._missed_frames = 0
             self._trajectory_support_frames = 0
             return observation
@@ -263,22 +428,39 @@ class BallTracker:
         )
         if activity_supported:
             self._player_activity_support_frames += 1
-        if self._pending_reacquisition is not None:
-            return None
+        player_overlaps_prediction = (
+            trajectory_center is not None
+            and self._is_occluded_by_player(trajectory_center, boxes)
+        )
+        occlusion_supported = (
+            player_overlaps_prediction
+            and self._player_occlusion_support_frames
+            < self.maximum_player_occlusion_frames
+        )
+        if occlusion_supported:
+            self._player_occlusion_support_frames += 1
+        elif not player_overlaps_prediction:
+            self._player_occlusion_support_frames = 0
         if not self._observations:
             return None
-        if not activity_supported and (
+        if not activity_supported and not occlusion_supported and (
             predicted_center is None or self._missed_frames > self.maximum_gap_frames
         ):
             return None
 
         previous = self._observations[-1]
         last_detected = self._detected_observations[-1]
-        if activity_supported:
-            predicted_confidence = min(
-                self.acquisition_confidence - 1e-6,
-                last_detected.confidence
-                * (0.94 ** self._player_activity_support_frames),
+        if activity_supported or occlusion_supported:
+            support_frames = max(
+                self._player_activity_support_frames,
+                self._player_occlusion_support_frames,
+            )
+            predicted_confidence = max(
+                self.minimum_prediction_confidence,
+                min(
+                    self.acquisition_confidence - 1e-6,
+                    last_detected.confidence * (0.94 ** support_frames),
+                ),
             )
         else:
             predicted_confidence = max(
@@ -289,7 +471,11 @@ class BallTracker:
             return None
         width = previous.box[2] - previous.box[0]
         height = previous.box[3] - previous.box[1]
-        prediction_center = trajectory_center if activity_supported else predicted_center
+        prediction_center = (
+            trajectory_center
+            if activity_supported or occlusion_supported
+            else predicted_center
+        )
         if prediction_center is None:
             return None
         x, y = prediction_center
@@ -299,9 +485,33 @@ class BallTracker:
             box=(x - width / 2.0, y - height / 2.0, x + width / 2.0, y + height / 2.0),
             confidence=predicted_confidence,
             source="predicted",
+            track_segment=self._track_segment,
         )
         self._observations.append(observation)
         return observation
+
+    def _is_occluded_by_player(
+        self,
+        predicted_center: tuple[float, float],
+        player_boxes: tuple[tuple[float, float, float, float], ...],
+    ) -> bool:
+        """Return whether a proven ball path passes behind a player's legs.
+
+        Only the lower portion of a person box counts. This cannot start or
+        move a track; it merely extends a pre-existing velocity prediction for
+        a tightly bounded number of frames.
+        """
+        x, y = predicted_center
+        margin = self.player_occlusion_horizontal_margin_pixels
+        for x1, y1, x2, y2 in player_boxes:
+            height = max(0.0, y2 - y1)
+            lower_body_y = y1 + height * 0.45
+            if (
+                x1 - margin <= x <= x2 + margin
+                and lower_body_y <= y <= y2 + margin
+            ):
+                return True
+        return False
 
     def _has_player_activity_support(
         self,
@@ -331,7 +541,19 @@ class BallTracker:
         player_footpoints: tuple[tuple[float, float], ...],
     ) -> BallCandidate | None:
         if not candidates:
+            self._pending_early_motion = None
+            self._pending_active_handoff = None
             return None
+
+        active_handoff = self._confirm_active_handoff(
+            candidates,
+            predicted_center,
+            frame_number,
+            player_footpoints,
+        )
+        if active_handoff is not None:
+            self._confirmed_active_handoff = True
+            return active_handoff
 
         # Alleen bevestigde detecties vormen een fysiek uitgangspunt. Zeer
         # zwakke kandidaten mogen de bewezen balbaan niet verplaatsen.
@@ -341,11 +563,34 @@ class BallTracker:
             player_footpoints,
         )
         if not candidates:
+            self._pending_early_motion = None
             return None
+
+        grounded_candidate = self._best_grounded_candidate(
+            candidates,
+            predicted_center,
+            player_footpoints,
+        )
+        if grounded_candidate is not None:
+            return grounded_candidate
+
+        early_motion_active = (
+            self._early_motion_active_until_frame is not None
+            and int(frame_number) <= self._early_motion_active_until_frame
+        )
+        if len(self._detected_observations) == 1 or (
+            early_motion_active and predicted_center is None
+        ):
+            early_motion = self._confirm_early_motion(
+                candidates,
+                frame_number,
+            )
+            if early_motion is not None:
+                return early_motion
 
         if predicted_center is None:
             if not self._detected_observations:
-                return max(candidates, key=lambda candidate: candidate.confidence)
+                return self._best_active_candidate(candidates, player_footpoints)
 
             last = self._detected_observations[-1]
             elapsed = max(1, int(frame_number) - last.frame_number)
@@ -375,7 +620,7 @@ class BallTracker:
                 expected_center = self._predict_center(frame_number) or last.center
                 return self._best_continuation(nearby, expected_center, radius)
 
-            strongest = max(candidates, key=lambda candidate: candidate.confidence)
+            strongest = self._best_active_candidate(candidates, player_footpoints)
             if strongest.confidence < self.acquisition_confidence:
                 return None
             pending = self._pending_reacquisition
@@ -436,6 +681,255 @@ class BallTracker:
             scored.append((score, candidate))
         return max(scored, key=lambda item: item[0])[1] if scored else None
 
+    def _best_grounded_candidate(
+        self,
+        candidates: list[BallCandidate],
+        predicted_center: tuple[float, float] | None,
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> BallCandidate | None:
+        """Prefer a strong ball at a player's feet over a weak continuation.
+
+        A credible existing continuation still wins, because a ball in flight
+        can legitimately be away from every player. The foot preference only
+        resolves frames where the old trajectory is supported by weak clutter.
+        """
+
+        if predicted_center is None or not player_footpoints:
+            return None
+
+        credible_continuation = any(
+            candidate.confidence >= self.acquisition_confidence
+            and float(np.linalg.norm(np.subtract(candidate.center, predicted_center)))
+            <= self.maximum_jump_pixels
+            for candidate in candidates
+        )
+        if credible_continuation:
+            return None
+
+        grounded = [
+            candidate
+            for candidate in candidates
+            if candidate.confidence >= self.acquisition_confidence
+            and self._near_player_contact(candidate.center, player_footpoints)
+        ]
+        return max(grounded, key=lambda item: item.confidence) if grounded else None
+
+    def _confirm_active_handoff(
+        self,
+        candidates: list[BallCandidate],
+        predicted_center: tuple[float, float] | None,
+        frame_number: int,
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> BallCandidate | None:
+        """Confirm a strong distant ball inside the active player cluster.
+
+        Temporal continuity remains authoritative while a credible candidate
+        exists near the predicted track. A distant handoff is considered only
+        when that continuation is absent, and then requires a strong candidate
+        near multiple players for consecutive frames. This lets the tracker
+        recover from an incorrect weak track without jumping to one isolated
+        white object.
+        """
+
+        if predicted_center is None or not self._detected_observations:
+            self._pending_active_handoff = None
+            return None
+
+        credible_continuation = any(
+            candidate.confidence >= self.acquisition_confidence
+            and float(np.linalg.norm(np.subtract(candidate.center, predicted_center)))
+            <= self.maximum_jump_pixels
+            for candidate in candidates
+        )
+        if credible_continuation:
+            self._pending_active_handoff = None
+            return None
+
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.confidence >= self.active_handoff_confidence
+            and float(np.linalg.norm(np.subtract(candidate.center, predicted_center)))
+            > self.maximum_jump_pixels
+            and self._has_multi_player_activity(
+                candidate.center,
+                player_footpoints,
+            )
+        ]
+        if not eligible:
+            self._pending_active_handoff = None
+            return None
+
+        strongest = max(eligible, key=lambda candidate: candidate.confidence)
+        pending = self._pending_active_handoff
+        if pending is not None:
+            pending_frame, pending_candidate, count = pending
+            distance = float(
+                np.linalg.norm(
+                    np.subtract(strongest.center, pending_candidate.center)
+                )
+            )
+            if (
+                int(frame_number) == pending_frame + 1
+                and distance <= self.reacquisition_confirmation_radius_pixels
+            ):
+                count += 1
+                if count >= self.active_handoff_confirmation_frames:
+                    self._pending_active_handoff = None
+                    return strongest
+                self._pending_active_handoff = (
+                    int(frame_number),
+                    strongest,
+                    count,
+                )
+                return None
+
+        self._pending_active_handoff = (int(frame_number), strongest, 1)
+        return None
+
+    def _confirm_early_motion(
+        self,
+        candidates: list[BallCandidate],
+        frame_number: int,
+    ) -> BallCandidate | None:
+        """Turn coherent weak post-contact motion into a second ball anchor.
+
+        A single strong contact frame cannot provide velocity. During a short
+        bootstrap window, weak detections may therefore form a pending motion
+        chain. The chain never moves the public trajectory until consecutive,
+        physically plausible motion has been confirmed.
+        """
+
+        if (
+            not self._bootstrap_contact_confirmed
+            or not self._detected_observations
+            or self.early_motion_window_frames == 0
+        ):
+            self._pending_early_motion = None
+            return None
+
+        initial_anchor = self._detected_observations[0]
+        if (
+            self._early_motion_active_until_frame is not None
+            and int(frame_number) > self._early_motion_active_until_frame
+        ):
+            self._pending_early_motion = None
+            return None
+        anchor = self._detected_observations[-1]
+        elapsed = int(frame_number) - anchor.frame_number
+        initial_elapsed = int(frame_number) - initial_anchor.frame_number
+        if (
+            elapsed <= 0
+            or initial_elapsed > self.early_motion_window_frames
+        ):
+            self._pending_early_motion = None
+            return None
+
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.confidence >= self.weak_reacquisition_confidence
+            and float(np.linalg.norm(np.subtract(candidate.center, anchor.center)))
+            <= self.maximum_speed_pixels_per_frame * elapsed
+        ]
+        if not eligible:
+            self._pending_early_motion = None
+            return None
+
+        pending = self._pending_early_motion
+        if pending is None:
+            candidate = min(
+                eligible,
+                key=lambda item: float(
+                    np.linalg.norm(np.subtract(item.center, anchor.center))
+                ),
+            )
+            self._pending_early_motion = (
+                int(frame_number),
+                candidate,
+                candidate,
+                1,
+            )
+            return None
+
+        pending_frame, first_candidate, previous_candidate, count = pending
+        if int(frame_number) != pending_frame + 1:
+            self._pending_early_motion = None
+            return None
+
+        first_delta = max(1, pending_frame - anchor.frame_number)
+        velocity = np.subtract(first_candidate.center, anchor.center) / first_delta
+        expected_center = np.add(previous_candidate.center, velocity)
+        continuations = [
+            candidate
+            for candidate in eligible
+            if float(np.linalg.norm(np.subtract(candidate.center, expected_center)))
+            <= self.early_motion_radius_pixels
+        ]
+        if not continuations:
+            self._pending_early_motion = None
+            return None
+
+        candidate = min(
+            continuations,
+            key=lambda item: float(
+                np.linalg.norm(np.subtract(item.center, expected_center))
+            ),
+        )
+        count += 1
+        displacement = float(
+            np.linalg.norm(np.subtract(candidate.center, anchor.center))
+        )
+        if count < self.early_motion_confirmation_frames:
+            self._pending_early_motion = (
+                int(frame_number),
+                first_candidate,
+                candidate,
+                count,
+            )
+            return None
+        if displacement < self.early_motion_minimum_displacement_pixels:
+            self._pending_early_motion = None
+            return None
+
+        self._pending_early_motion = None
+        if self._early_motion_active_until_frame is None:
+            self._early_motion_active_until_frame = (
+                initial_anchor.frame_number + self.early_motion_window_frames
+            )
+        self._confirmed_weak_reacquisition = True
+        return candidate
+
+    def _best_active_candidate(
+        self,
+        candidates: list[BallCandidate],
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> BallCandidate:
+        """Prefer a similarly credible candidate close to the current play.
+
+        Player proximity is deliberately only a bounded tie-breaker. A ball in
+        flight can be far from every player, so a clearly stronger isolated
+        detection must still win. Temporal continuity remains authoritative
+        after the first physical anchor has been selected.
+        """
+
+        weight = self.player_proximity_weight
+        if weight <= 0.0 or not player_footpoints:
+            return max(candidates, key=lambda candidate: candidate.confidence)
+
+        def score(candidate: BallCandidate) -> float:
+            nearest_player = min(
+                float(np.linalg.norm(np.subtract(candidate.center, footpoint)))
+                for footpoint in player_footpoints
+            )
+            proximity = max(
+                0.0,
+                1.0 - nearest_player / max(self.player_activity_radius_pixels, 1e-6),
+            )
+            return (1.0 - weight) * candidate.confidence + weight * proximity
+
+        return max(candidates, key=score)
+
     def _confirm_weak_reacquisition(
         self,
         candidates: list[BallCandidate],
@@ -450,12 +944,34 @@ class BallTracker:
             candidate
             for candidate in candidates
             if candidate.confidence >= self.weak_reacquisition_confidence
-            and self._has_multi_player_activity(
-                candidate.center,
-                player_footpoints,
+            and min(candidate.size) >= self.weak_reacquisition_minimum_size
+            and (
+                self._has_weak_reacquisition_activity(
+                    candidate.center,
+                    player_footpoints,
+                )
+                or (
+                    candidate.confidence >= self.acquisition_confidence
+                    and self._near_player_contact(
+                        candidate.center,
+                        player_footpoints,
+                    )
+                )
             )
-            and float(np.linalg.norm(np.subtract(candidate.center, last_center)))
-            <= search_radius
+            and (
+                float(np.linalg.norm(np.subtract(candidate.center, last_center)))
+                <= search_radius
+                or (
+                    self._missed_frames
+                    >= self.remote_weak_reacquisition_after_frames
+                    and candidate.confidence
+                    >= self.remote_weak_reacquisition_confidence
+                    and self._has_remote_weak_foot_support(
+                        candidate.center,
+                        player_footpoints,
+                    )
+                )
+            )
         ]
         if not eligible:
             self._pending_reacquisition = None
@@ -498,6 +1014,10 @@ class BallTracker:
             return None
 
         self._confirmed_weak_reacquisition = True
+        self._confirmed_remote_weak_reacquisition = (
+            float(np.linalg.norm(np.subtract(candidate.center, last_center)))
+            > search_radius
+        )
         return candidate
 
     def _has_multi_player_activity(
@@ -512,6 +1032,39 @@ class BallTracker:
             for footpoint in player_footpoints
         )
         return nearby_players >= self.minimum_activity_players
+
+    def _has_weak_reacquisition_activity(
+        self,
+        center: tuple[float, float],
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> bool:
+        nearby_players = sum(
+            float(np.linalg.norm(np.subtract(center, footpoint)))
+            <= self.player_activity_radius_pixels
+            for footpoint in player_footpoints
+        )
+        return nearby_players >= self.weak_reacquisition_minimum_players
+
+    def _has_remote_weak_foot_support(
+        self,
+        center: tuple[float, float],
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> bool:
+        """Reject weak remote restarts above the players' foot line.
+
+        A low-confidence ball can restart a lost track only at ground-level
+        player contact. This intentionally excludes persistent head and torso
+        detections when the person box is missing or imprecise. Strong ball
+        detections and local trajectory continuations remain unaffected.
+        """
+
+        x, y = center
+        tolerance = self.remote_weak_footpoint_vertical_tolerance_pixels
+        return any(
+            abs(y - foot_y) <= tolerance
+            and abs(x - foot_x) <= self.player_activity_radius_pixels
+            for foot_x, foot_y in player_footpoints
+        )
 
     def _best_continuation(
         self,
@@ -555,21 +1108,68 @@ class BallTracker:
 
         stationary_center = self._stationary_center()
         velocity = self._robust_velocity()
+        recent_player_contact = (
+            self._last_player_contact_frame is not None
+            and int(frame_number) - self._last_player_contact_frame
+            <= self.player_contact_memory_frames
+        )
         plausible: list[BallCandidate] = []
         for candidate in candidates:
+            candidate_at_player = self._near_player_contact(
+                candidate.center,
+                player_footpoints,
+            )
+            remote_weak_candidate = (
+                self._missed_frames >= self.remote_weak_reacquisition_after_frames
+                and candidate.confidence
+                >= self.remote_weak_reacquisition_confidence
+                and min(candidate.size) >= self.weak_reacquisition_minimum_size
+                and not self._current_track_has_player_support(
+                    frame_number,
+                    player_footpoints,
+                )
+                and self._has_weak_reacquisition_activity(
+                    candidate.center,
+                    player_footpoints,
+                )
+                and self._has_remote_weak_foot_support(
+                    candidate.center,
+                    player_footpoints,
+                )
+            )
+            strong_grounded_restart = (
+                self._missed_frames >= self.remote_weak_reacquisition_after_frames
+                and candidate.confidence >= self.acquisition_confidence
+                and min(candidate.size) >= self.weak_reacquisition_minimum_size
+                and not self._current_track_has_player_support(
+                    frame_number,
+                    player_footpoints,
+                )
+                and candidate_at_player
+                and self._has_remote_weak_foot_support(
+                    candidate.center,
+                    player_footpoints,
+                )
+            )
+            if remote_weak_candidate or strong_grounded_restart:
+                plausible.append(candidate)
+                continue
             displacement = float(
                 np.linalg.norm(np.subtract(candidate.center, last_accepted.center))
             )
-            near_player = self._near_player_contact(
-                candidate.center,
+            near_player = candidate_at_player or self._near_player_contact(
+                last_accepted.center,
                 player_footpoints,
-            ) or self._near_player_contact(last_accepted.center, player_footpoints)
+            ) or recent_player_contact
             speed_limit = self.maximum_speed_pixels_per_frame
             if near_player:
                 speed_limit *= self.contact_speed_multiplier
             if displacement > speed_limit * elapsed:
                 continue
-            if stationary_center is not None:
+            if stationary_center is not None and not (
+                candidate_at_player
+                and candidate.confidence >= self.acquisition_confidence
+            ):
                 stationary_displacement = float(
                     np.linalg.norm(np.subtract(candidate.center, stationary_center))
                 )
@@ -592,6 +1192,27 @@ class BallTracker:
                         continue
             plausible.append(candidate)
         return plausible
+
+    def _current_track_has_player_support(
+        self,
+        frame_number: int,
+        player_footpoints: tuple[tuple[float, float], ...],
+    ) -> bool:
+        """Keep a proven player-supported ball ahead of remote weak clutter."""
+
+        predicted_center = self._predict_center(frame_number)
+        recently_at_player = (
+            self._last_player_contact_frame is not None
+            and int(frame_number) - self._last_player_contact_frame
+            <= self.remote_weak_player_contact_lock_frames
+        )
+        return recently_at_player or (
+            predicted_center is not None
+            and self._has_player_activity_support(
+                predicted_center,
+                player_footpoints,
+            )
+        )
 
     def _near_player_contact(
         self,
@@ -693,6 +1314,8 @@ def interpolate_detected_gaps(
     by_frame = {item.frame_number: item for item in ordered}
     detected = [item for item in ordered if item.source == "detected"]
     for start, end in zip(detected, detected[1:], strict=False):
+        if start.track_segment != end.track_segment:
+            continue
         frame_delta = end.frame_number - start.frame_number
         missing_frames = frame_delta - 1
         if missing_frames <= 0 or missing_frames > maximum_gap_frames:
@@ -716,6 +1339,7 @@ def interpolate_detected_gaps(
                 box=tuple(float(value) for value in box),
                 confidence=float(confidence),
                 source="interpolated",
+                track_segment=start.track_segment,
             )
     return tuple(by_frame[frame] for frame in sorted(by_frame))
 
@@ -725,6 +1349,9 @@ def hold_stationary_detected_gaps(
     maximum_gap_frames: int,
     maximum_displacement_pixels: float = 35.0,
     minimum_endpoint_confidence: float = 0.50,
+    stationary_evidence_detections: int = 3,
+    stationary_evidence_window_frames: int = 5,
+    stationary_evidence_radius_pixels: float = 12.0,
 ) -> tuple[BallObservation, ...]:
     """Keep a stationary ball visible between matching reliable detections.
 
@@ -741,13 +1368,21 @@ def hold_stationary_detected_gaps(
 
     ordered = sorted(observations, key=lambda item: item.frame_number)
     by_frame = {item.frame_number: item for item in ordered}
+    all_detected = [item for item in ordered if item.source == "detected"]
     detected = [
         item
         for item in ordered
         if item.source == "detected"
         and item.confidence >= minimum_endpoint_confidence
     ]
-    for start, end in zip(detected, detected[1:], strict=False):
+    evidence_count = max(1, int(stationary_evidence_detections))
+    evidence_window = max(0, int(stationary_evidence_window_frames))
+    evidence_radius = max(0.0, float(stationary_evidence_radius_pixels))
+    for endpoint_index, (start, end) in enumerate(
+        zip(detected, detected[1:], strict=False)
+    ):
+        if start.track_segment != end.track_segment:
+            continue
         frame_delta = end.frame_number - start.frame_number
         missing_frames = frame_delta - 1
         if missing_frames <= 0 or missing_frames > maximum_gap_frames:
@@ -762,16 +1397,60 @@ def hold_stationary_detected_gaps(
         if displacement > allowed:
             continue
 
+        before = detected[max(0, endpoint_index - evidence_count + 1) : endpoint_index + 1]
+        after_start = endpoint_index + 1
+        after = detected[after_start : after_start + evidence_count]
+        if len(before) < evidence_count or len(after) < evidence_count:
+            continue
+        if start.frame_number - before[0].frame_number > evidence_window:
+            continue
+        if after[-1].frame_number - end.frame_number > evidence_window:
+            continue
+        start_evidence_center = np.mean(
+            np.asarray([item.center for item in before]),
+            axis=0,
+        )
+        end_evidence_center = np.mean(
+            np.asarray([item.center for item in after]),
+            axis=0,
+        )
+        if any(
+            float(np.linalg.norm(np.subtract(item.center, start_evidence_center)))
+            > evidence_radius
+            for item in before
+        ) or any(
+            float(np.linalg.norm(np.subtract(item.center, end_evidence_center)))
+            > evidence_radius
+            for item in after
+        ):
+            continue
+
         center = np.mean(np.asarray([start.center, end.center]), axis=0)
+        intervening_detections = [
+            item
+            for item in all_detected
+            if start.frame_number < item.frame_number < end.frame_number
+        ]
+        if any(
+            float(np.linalg.norm(np.subtract(item.center, center))) > allowed
+            for item in intervening_detections
+        ):
+            # The ball left this location and later returned. Treating that as
+            # one long stationary interval would erase the observed flight.
+            continue
         box = np.mean(np.asarray([start.box, end.box]), axis=0)
         confidence = min(start.confidence, end.confidence) * 0.70
         for frame_number in range(start.frame_number + 1, end.frame_number):
+            existing = by_frame.get(frame_number)
+            if existing is not None and existing.source == "detected":
+                continue
             by_frame[frame_number] = BallObservation(
                 frame_number=frame_number,
                 center=tuple(float(value) for value in center),
                 box=tuple(float(value) for value in box),
                 confidence=float(confidence),
                 source="stationary_hold",
+                track_segment=start.track_segment,
             )
     return tuple(by_frame[frame] for frame in sorted(by_frame))
 
@@ -791,6 +1470,14 @@ def exclude_candidates_inside_people(
     lower_body_start: float = 0.45,
     lower_body_end: float = 0.88,
     maximum_person_overlap: float = 0.55,
+    foot_priority_confidence: float = 0.50,
+    foot_priority_radius_pixels: float = 25.0,
+    foot_priority_minimum_size: float = 14.0,
+    weak_leg_minimum_confidence: float = 0.05,
+    weak_leg_minimum_size: float = 8.0,
+    weak_leg_maximum_size: float = 24.0,
+    crowded_play_radius_pixels: float = 90.0,
+    crowded_play_minimum_players: int = 2,
 ) -> list[BallCandidate]:
     """Remove body, sock and shoe candidates while preserving nearby balls.
 
@@ -811,14 +1498,58 @@ def exclude_candidates_inside_people(
             (candidate_x2 - candidate_x1) * (candidate_y2 - candidate_y1),
         )
         overlaps_person_feet = False
+        inside_person_body = False
         inside_lower_body = False
+        strong_ball_at_feet = False
+        weak_ball_in_leg_zone = False
+        maximum_overlap_seen = 0.0
+        weak_ball_sized = (
+            weak_leg_minimum_confidence
+            <= candidate.confidence
+            < foot_priority_confidence
+            and weak_leg_minimum_size <= min(candidate.size)
+            and max(candidate.size) <= weak_leg_maximum_size
+        )
+        crowded_foot_support = 0
         for x1, y1, x2, y2 in people:
             height = y2 - y1
             lower_start_y = y1 + height * lower_body_start
+            if (
+                weak_ball_sized
+                and lower_start_y <= y <= y2 + foot_priority_radius_pixels
+                and float(
+                    np.linalg.norm(
+                        np.subtract((x, y), ((x1 + x2) / 2.0, y2))
+                    )
+                )
+                <= crowded_play_radius_pixels
+            ):
+                crowded_foot_support += 1
+            foot_zone_horizontal_margin = foot_priority_radius_pixels
+            foot_zone_top = y2 - foot_priority_radius_pixels
+            foot_zone_bottom = y2 + foot_priority_radius_pixels
+            if (
+                candidate.confidence >= foot_priority_confidence
+                and min(candidate.size) >= foot_priority_minimum_size
+                and x1 - foot_zone_horizontal_margin
+                <= x
+                <= x2 + foot_zone_horizontal_margin
+                and foot_zone_top <= y <= foot_zone_bottom
+            ):
+                strong_ball_at_feet = True
+            inside_person_body = inside_person_body or (
+                x1 <= x <= x2 and y1 <= y <= y2
+            )
             inside_lower_body = inside_lower_body or (
                 x1 <= x <= x2
                 and lower_start_y <= y <= y1 + height * lower_body_end
             )
+            if (
+                weak_ball_sized
+                and x1 <= x <= x2
+                and lower_start_y <= y <= y1 + height * lower_body_end
+            ):
+                weak_ball_in_leg_zone = True
 
             overlap_x = max(0.0, min(candidate_x2, x2) - max(candidate_x1, x1))
             overlap_y = max(
@@ -826,11 +1557,24 @@ def exclude_candidates_inside_people(
                 min(candidate_y2, y2) - max(candidate_y1, lower_start_y),
             )
             overlap_fraction = (overlap_x * overlap_y) / candidate_area
+            maximum_overlap_seen = max(maximum_overlap_seen, overlap_fraction)
             if overlap_fraction >= maximum_person_overlap:
                 overlaps_person_feet = True
                 break
 
-        if not inside_lower_body and not overlaps_person_feet:
+        strong_ball_beside_legs = (
+            candidate.confidence >= foot_priority_confidence
+            and min(candidate.size) >= foot_priority_minimum_size
+            and inside_lower_body
+            and maximum_overlap_seen < maximum_person_overlap
+        )
+        weak_ball_in_crowded_play = (
+            weak_ball_sized
+            and crowded_foot_support >= max(2, int(crowded_play_minimum_players))
+        )
+        if strong_ball_at_feet or strong_ball_beside_legs or weak_ball_in_leg_zone or weak_ball_in_crowded_play or (
+            not inside_person_body and not overlaps_person_feet
+        ):
             accepted.append(candidate)
     return accepted
 
@@ -842,7 +1586,7 @@ def save_ball_observations(
     fps: float,
 ) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_video": source_video,
         "fps": float(fps),
         "observations": [asdict(item) for item in observations],

@@ -273,6 +273,7 @@ class PossessionTests(unittest.TestCase):
         tracker = PossessionTracker(
             confirmation_frames=2,
             maximum_unseen_possession_frames=2,
+            maximum_team_magnet_frames=2,
         )
         player = entity(1, TeamAssignment.TEAM_A, 100)
         tracker.update(0, ball(0, 100), [player])
@@ -297,6 +298,7 @@ class PossessionTests(unittest.TestCase):
             confirmation_frames=2,
             opponent_confirmation_frames=2,
             maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=1,
         )
         first = entity(1, TeamAssignment.TEAM_A, 100)
         second = entity(2, TeamAssignment.TEAM_B, 200)
@@ -312,6 +314,127 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(reacquired.team, TeamAssignment.TEAM_B.value)
         self.assertEqual(tracker.turnovers, [])
         self.assertEqual(tracker.passes, [])
+
+    def test_team_magnet_extends_inferred_possession_without_nearby_opponent(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=5,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        teammate = entity(2, TeamAssignment.TEAM_A, 140)
+        tracker.update(0, ball(0, 100), [owner, teammate])
+        tracker.update(1, ball(1, 100), [owner, teammate])
+
+        tracker.update(2, None, [owner, teammate])
+        result = tracker.update(3, None, [owner, teammate])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.identity_id, owner.identity_id)
+        self.assertEqual(result.team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(result.evidence, "team_magnet")
+        self.assertEqual(tracker.passes, [])
+        self.assertEqual(tracker.turnovers, [])
+
+    def test_owner_magnet_survives_crowded_opponent_cluster(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=5,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        opponent = entity(2, TeamAssignment.TEAM_B, 130)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, None, [owner])
+
+        result = tracker.update(3, None, [owner, opponent])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.track_id, owner.track_id)
+        self.assertEqual(result.team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(tracker.turnovers, [])
+
+    def test_owner_magnet_survives_player_crossing_in_front_of_last_owner(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=5,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        occluding_opponent = entity(2, TeamAssignment.TEAM_B, 105)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, None, [owner])
+
+        result = tracker.update(3, None, [owner, occluding_opponent])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.track_id, owner.track_id)
+        self.assertEqual(result.team, TeamAssignment.TEAM_A.value)
+        self.assertEqual(tracker.turnovers, [])
+        self.assertEqual(tracker.passes, [])
+
+    def test_owner_magnet_follows_nearby_same_team_track_id_handover(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=5,
+            same_player_handover_radius=1.0,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        replacement_track = entity(9, TeamAssignment.TEAM_A, 108)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, None, [owner])
+
+        result = tracker.update(3, None, [replacement_track])
+
+        self.assertEqual(result.state, PossessionState.INFERRED)
+        self.assertEqual(result.track_id, replacement_track.track_id)
+        self.assertEqual(result.evidence, "team_magnet")
+        self.assertEqual(tracker.turnovers, [])
+        self.assertEqual(tracker.passes, [])
+
+    def test_owner_magnet_blocks_proxy_handoff_inside_opponent_cluster(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=5,
+            same_player_handover_radius=1.0,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        replacement_track = entity(9, TeamAssignment.TEAM_A, 108)
+        opponent = entity(2, TeamAssignment.TEAM_B, 110)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, None, [owner])
+
+        tracker.update(3, None, [replacement_track, opponent])
+        result = tracker.update(4, None, [replacement_track, opponent])
+
+        self.assertEqual(result.state, PossessionState.UNKNOWN)
+        self.assertIsNone(result.team)
+        self.assertEqual(tracker.passes, [])
+        self.assertEqual(tracker.turnovers, [])
+
+    def test_team_magnet_stops_at_bounded_unseen_limit(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=2,
+            maximum_unseen_possession_frames=1,
+            maximum_team_magnet_frames=3,
+        )
+        owner = entity(1, TeamAssignment.TEAM_A, 100)
+        tracker.update(0, ball(0, 100), [owner])
+        tracker.update(1, ball(1, 100), [owner])
+        tracker.update(2, None, [owner])
+        tracker.update(3, None, [owner])
+        tracker.update(4, None, [owner])
+
+        result = tracker.update(5, None, [owner])
+
+        self.assertEqual(result.state, PossessionState.UNKNOWN)
+        self.assertIsNone(result.team)
 
     def test_opponent_must_be_confirmed_before_possession_changes(self) -> None:
         tracker = PossessionTracker(
@@ -495,6 +618,20 @@ class PossessionTests(unittest.TestCase):
         self.assertFalse(
             should_render_inferred_ball(possession, ball(5, 300, confidence=0.84))
         )
+
+    def test_reliable_predicted_ball_suppresses_inferred_ball_marker(self) -> None:
+        possession = PossessionObservation(
+            5, PossessionState.INFERRED, 7, 12, "Speler 7", "team_a", 0.6
+        )
+        predicted = BallObservation(
+            5,
+            (300.0, 100.0),
+            (297.0, 97.0, 303.0, 103.0),
+            0.499999,
+            "predicted",
+        )
+
+        self.assertFalse(should_render_inferred_ball(possession, predicted))
 
     def test_missing_or_weak_ball_allows_inferred_ball_marker(self) -> None:
         possession = PossessionObservation(

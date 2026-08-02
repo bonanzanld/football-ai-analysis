@@ -51,19 +51,17 @@ def main() -> None:
     ball_dir = PROJECT_ROOT / "output" / "ball"
     timeline_path = entity_dir / f"{prefix}_entity_timeline.json"
     ball_path = ball_dir / f"{prefix}_ball_tracking.json"
-    # Start vanaf de entiteitenvideo. De gecombineerde video bevat de
-    # balmarkering al ingebakken, waardoor een verworpen interpolatie naast
-    # "BAL vermoedelijk" zichtbaar bleef. Hier tekenen we bewust precies een
-    # balbron per frame.
-    base_video = entity_dir / f"{prefix}_entities_qa.mp4"
+    # Render vanaf de originele video en gebruik de entiteitentijdlijn alleen
+    # als data-overlay. Afgeleide QA-video's kunnen verouderd of gedeeltelijk
+    # beschadigd zijn en mogen de bezitstijdlijn niet afkappen. Bovendien
+    # tekenen we zo bewust precies een balbron per frame.
+    base_video = video_path
     if not timeline_path.exists():
         raise FileNotFoundError(
             f"Entiteitentijdlijn ontbreekt: {timeline_path}. Draai eerst tools/analyze_entities.py opnieuw."
         )
     if not ball_path.exists():
         raise FileNotFoundError(f"Balrapport ontbreekt: {ball_path}. Draai eerst tools/analyze_ball.py.")
-    if not base_video.exists():
-        raise FileNotFoundError(f"Entiteitenvideo ontbreekt: {base_video}.")
 
     timeline = load_entity_timeline(timeline_path)
     roster_path = entity_dir / f"{prefix}_team_roster.json"
@@ -105,6 +103,8 @@ def main() -> None:
     report_path = output_dir / f"{prefix}_possession.json"
     raw_path = output_dir / f"{prefix}_possession_qa_raw.mp4"
     output_path = output_dir / f"{prefix}_possession_qa.mp4"
+    ball_only_raw_path = output_dir / f"{prefix}_ball_tracking_only_raw.mp4"
+    ball_only_path = output_dir / f"{prefix}_ball_tracking_only.mp4"
     save_possession_report(
         report_path,
         timeline.source_video,
@@ -139,6 +139,14 @@ def main() -> None:
         args.camera_height,
     )
     _transcode(raw_path, output_path)
+    _render_ball_tracking_only(
+        video_path,
+        ball_only_raw_path,
+        observations,
+        entities_by_frame,
+        balls,
+    )
+    _transcode(ball_only_raw_path, ball_only_path)
 
     controlled = sum(item.state is PossessionState.CONTROLLED for item in observations)
     inferred = sum(item.state is PossessionState.INFERRED for item in observations)
@@ -157,7 +165,61 @@ def main() -> None:
         f"{match_timeline.suppressed_team_switches} frames"
     )
     print(f"QA-video: {output_path}")
+    print(f"Alleen balltracking: {ball_only_path}")
     print(f"Balbezitrapport: {report_path}")
+
+
+def _render_ball_tracking_only(
+    video_path: Path,
+    output_path: Path,
+    observations,
+    entities_by_frame,
+    balls,
+) -> None:
+    """Render original footage with no overlays except the selected ball."""
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Video kon niet worden geopend: {video_path}")
+    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    try:
+        for frame_number, possession in enumerate(observations):
+            success, frame = capture.read()
+            if not success:
+                break
+            raw_ball = balls.get(frame_number)
+            # Dit is expliciet de balltracking-only video. Iedere positie die
+            # de tracker zelf levert heeft daarom voorrang, ook wanneer het
+            # een zwakke voorspelling of interpolatie is. De bezitsmagneet is
+            # uitsluitend een laatste visuele fallback bij een echt leeg
+            # trackerframe.
+            if raw_ball is None and possession.state is PossessionState.INFERRED:
+                owner = next(
+                    (
+                        item
+                        for item in entities_by_frame.get(frame_number, [])
+                        if item.track_id == possession.track_id
+                    ),
+                    None,
+                )
+                if owner is not None:
+                    point = tuple(int(round(value)) for value in owner.footpoint)
+                    cv2.circle(frame, point, 10, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.circle(frame, point, 10, (0, 255, 255), 2, cv2.LINE_AA)
+            else:
+                frame = draw_ball_observation(frame, raw_ball)
+            writer.write(frame)
+    finally:
+        capture.release()
+        writer.release()
 
 
 def _render(

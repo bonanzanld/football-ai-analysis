@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "source_video": "videos/brandevoortBRAB_vid2.mp4",
+  "fps": 29.97002997002997,
+  "human_review_required": true,
+  "annotation_rules": {
+    "visibility": [
+      "visible",
+      "occluded",
+      "not_visible",
+      "unreviewed"
+    ],
+    "ball_box": "[x1, y1, x2, y2] in original image pixels; required for visible/occluded",
+    "occlusion": [
+      "none",
+      "player",
+      "shadow",
+      "other"
+    ]
+  },
+  "annotations": [
+    {
+      "frame_number": 400,
+      "image": "frames/frame_000400.jpg",
+      "visibility": "visible",
+      "ball_box": [
+        581.5901639344262,
+        332.9344262295082,
+        595.5901639344262,
+        346.9344262295082
+      ],
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 405,
+      "image": "frames/frame_000405.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 410,
+      "image": "frames/frame_000410.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 415,
+      "image": "frames/frame_000415.jpg",
+      "visibility": "visible",
+      "ball_box": [
+        635.0983606557377,
+        319.2950819672131,
+        649.0983606557377,
+        333.2950819672131
+      ],
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 420,
+      "image": "frames/frame_000420.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 425,
+      "image": "frames/frame_000425.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 430,
+      "image": "frames/frame_000430.jpg",
+      "visibility": "visible",
+      "ball_box": [
+        653.983606557377,
+        323.4918032786885,
+        667.983606557377,
+        337.4918032786885
+      ],
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 435,
+      "image": "frames/frame_000435.jpg",
+      "visibility": "visible",
+      "ball_box": [
+        652.9344262295082,
+        321.39344262295083,
+        666.9344262295082,
+        335.39344262295083
+      ],
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 440,
+      "image": "frames/frame_000440.jpg",
+      "visibility": "visible",
+      "ball_box": [
+        659.2295081967213,
+        325.59016393442624,
+        673.2295081967213,
+        339.59016393442624
+      ],
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 445,
+      "image": "frames/frame_000445.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 450,
+      "image": "frames/frame_000450.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 455,
+      "image": "frames/frame_000455.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 460,
+      "image": "frames/frame_000460.jpg",
+      "visibility": "occluded",
+      "ball_box": [
+        670.7704918032787,
+        323.4918032786885,
+        684.7704918032787,
+        337.4918032786885
+      ],
+      "occlusion": "player",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 465,
+      "image": "frames/frame_000465.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 470,
+      "image": "frames/frame_000470.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 475,
+      "image": "frames/frame_000475.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 480,
+      "image": "frames/frame_000480.jpg",
+      "visibility": "not_visible",
+      "ball_box": null,
+      "occlusion": "none",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 485,
+      "image": "frames/frame_000485.jpg",
+      "visibility": "occluded",
+      "ball_box": [
+        707.4918032786885,
+        321.39344262295083,
+        721.4918032786885,
+        335.39344262295083
+      ],
+      "occlusion": "player",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 490,
+      "image": "frames/frame_000490.jpg",
+      "visibility": "occluded",
+      "ball_box": [
+        717.983606557377,
+        321.39344262295083,
+        731.983606557377,
+        335.39344262295083
+      ],
+      "occlusion": "player",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 495,
+      "image": "frames/frame_000495.jpg",
+      "visibility": "occluded",
+      "ball_box": [
+        728.4754098360655,
+        320.344262295082,
+        742.4754098360655,
+        334.344262295082
+      ],
+      "occlusion": "player",
+      "review_status": "human_reviewed",
+      "notes": ""
+    },
+    {
+      "frame_number": 500,
+      "image": "frames/frame_000500.jpg",
+      "visibility": "occluded",
+      "ball_box": [
+        738.9672131147541,
+        319.2950819672131,
+        752.9672131147541,
+        333.2950819672131
+      ],
+      "occlusion": "player",
+      "review_status": "human_reviewed",
+      "notes": ""
+    }
+  ],
+  "human_review_complete": true
+}

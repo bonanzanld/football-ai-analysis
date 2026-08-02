@@ -42,6 +42,41 @@ def temporary_track_observation(
 
 
 class MatchTimelineEngineTests(unittest.TestCase):
+    def test_team_magnet_remains_visible_without_confirming_team_switch(self) -> None:
+        raw = [
+            observation(0, PossessionState.CONTROLLED, 1, "team_b", 0.8),
+            observation(1, PossessionState.CONTROLLED, 1, "team_b", 0.8),
+            PossessionObservation(
+                frame_number=2,
+                state=PossessionState.INFERRED,
+                identity_id=None,
+                track_id=48,
+                label="ID 48",
+                team="team_a",
+                confidence=0.7,
+                evidence="team_magnet",
+            ),
+            PossessionObservation(
+                frame_number=3,
+                state=PossessionState.INFERRED,
+                identity_id=None,
+                track_id=48,
+                label="ID 48",
+                team="team_a",
+                confidence=0.6,
+                evidence="team_magnet",
+            ),
+            observation(4, PossessionState.CONTROLLED, 1, "team_b", 0.8),
+        ]
+
+        result = MatchTimelineEngine(fps=30.0).resolve(raw)
+
+        self.assertEqual(result.observations[2].state, PossessionState.INFERRED)
+        self.assertEqual(result.observations[2].team, "team_a")
+        self.assertEqual(result.observations[2].evidence, "team_magnet")
+        self.assertEqual(result.turnovers, ())
+        self.assertEqual(result.passes, ())
+
     def test_unknown_gap_freezes_possession_but_preserves_pass_context(self) -> None:
         raw = [
             observation(0, PossessionState.CONTROLLED, 1, "team_a"),

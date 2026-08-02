@@ -135,6 +135,14 @@ class MatchTimelineEngine:
                 continue
             if item.state not in {PossessionState.CONTROLLED, PossessionState.INFERRED}:
                 continue
+            if (
+                item.state is PossessionState.INFERRED
+                and item.evidence == "team_magnet"
+            ):
+                # Toon de expliciete bezitshypothese, maar gebruik een
+                # onzichtbare bal nooit om het laatst bevestigde team te
+                # vervangen. Event-afleiding gebruikt alleen CONTROLLED.
+                continue
             if last_team is None or item.team == last_team:
                 last_team = item.team
                 pending_team = None
@@ -402,6 +410,7 @@ def _without_possession(item: PossessionObservation) -> PossessionObservation:
         label=None,
         team=None,
         confidence=item.confidence,
+        evidence=item.evidence,
     )
 
 

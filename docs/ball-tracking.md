@@ -240,6 +240,28 @@ fix this switch without removing genuine ball evidence. The next selection
 improvement needs an additional identity signal, or must keep ambiguous weak
 candidates as non-physical support until stronger evidence appears.
 
+### Replaying tracker policy without detector inference
+
+A normal `analyze_ball.py` run now stores the filtered per-frame candidates,
+player context, and camera transforms in
+`output/ball/<video>_ball_candidates.json`. The cache is a generated QA
+artifact and is not versioned. Re-run only the tracker and QA render with:
+
+```bash
+MPLCONFIGDIR=/tmp/football-ai-mpl \
+  .venv/bin/python tools/analyze_ball.py \
+  --video brandevoortBRAB_vid2.mp4 \
+  --threshold 0.05 \
+  --reuse-candidates
+```
+
+The cache is accepted only for the same source-video path. A missing, empty,
+unknown-version, or mismatched cache fails explicitly. This makes tracker
+experiments repeatable and reduces a 30-second reference replay from minutes
+of detector inference to roughly ten seconds on the checked development
+machine. A normal run remains required after detector, person-filter, local
+crop, or camera-motion changes.
+
 ### Player and team possession magnet
 
 Ball position and possession confidence are intentionally separate. When the

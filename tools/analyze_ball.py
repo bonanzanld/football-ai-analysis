@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -105,11 +106,147 @@ def _observations_to_image_space(
     return converted
 
 
+def _save_candidate_cache(
+    path: Path,
+    *,
+    source_video: Path,
+    fps: float,
+    frame_candidates: list[tuple[BallCandidate, ...]],
+    frame_player_footpoints: list[tuple[tuple[float, float], ...]],
+    frame_player_boxes: list[tuple[tuple[float, float, float, float], ...]],
+    frame_transforms: list[np.ndarray],
+    accepted_camera_updates: int,
+    rejected_camera_updates: int,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "source_video": str(source_video),
+        "fps": float(fps),
+        "accepted_camera_updates": int(accepted_camera_updates),
+        "rejected_camera_updates": int(rejected_camera_updates),
+        "frames": [
+            {
+                "candidates": [
+                    {"box": list(candidate.box), "confidence": candidate.confidence}
+                    for candidate in candidates
+                ],
+                "player_footpoints": [list(point) for point in footpoints],
+                "player_boxes": [list(box) for box in boxes],
+                "transform": transform.tolist(),
+            }
+            for candidates, footpoints, boxes, transform in zip(
+                frame_candidates,
+                frame_player_footpoints,
+                frame_player_boxes,
+                frame_transforms,
+                strict=True,
+            )
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_candidate_cache(
+    path: Path,
+) -> tuple[
+    str,
+    float,
+    list[tuple[BallCandidate, ...]],
+    list[tuple[tuple[float, float], ...]],
+    list[tuple[tuple[float, float, float, float], ...]],
+    list[np.ndarray],
+    int,
+    int,
+]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"Onbekende kandidaatcache-versie: {payload.get('schema_version')}")
+    frames = payload.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("Kandidaatcache bevat geen frames")
+    frame_candidates = [
+        tuple(
+            BallCandidate(
+                box=tuple(float(value) for value in candidate["box"]),
+                confidence=float(candidate["confidence"]),
+            )
+            for candidate in frame.get("candidates", [])
+        )
+        for frame in frames
+    ]
+    frame_player_footpoints = [
+        tuple(
+            tuple(float(value) for value in point)
+            for point in frame.get("player_footpoints", [])
+        )
+        for frame in frames
+    ]
+    frame_player_boxes = [
+        tuple(
+            tuple(float(value) for value in box)
+            for box in frame.get("player_boxes", [])
+        )
+        for frame in frames
+    ]
+    frame_transforms = [
+        np.asarray(frame["transform"], dtype=np.float64)
+        for frame in frames
+    ]
+    return (
+        str(payload.get("source_video", "")),
+        float(payload["fps"]),
+        frame_candidates,
+        frame_player_footpoints,
+        frame_player_boxes,
+        frame_transforms,
+        int(payload.get("accepted_camera_updates", 0)),
+        int(payload.get("rejected_camera_updates", 0)),
+    )
+
+
+def _build_tracker(
+    fps: float,
+    threshold: float,
+) -> BallTracker:
+    return BallTracker(
+        maximum_gap_frames=5,
+        maximum_jump_pixels=70.0,
+        confidence_weight=0.25,
+        acquisition_confidence=0.50,
+        # A real ball in the reference opening reappears at 41% after a short
+        # gap, so a nearby continuation may anchor below the independent 50%
+        # acquisition threshold.
+        strong_reacquisition_confidence=0.30,
+        supporting_confidence=0.15,
+        weak_reacquisition_confidence=threshold,
+        # A distant restart remains stricter because low-confidence heads,
+        # shoes, and cones also persist near players.
+        remote_weak_reacquisition_confidence=max(threshold, 0.30),
+        remote_weak_reacquisition_after_frames=max(1, int(round(fps * 0.5))),
+        weak_reacquisition_minimum_players=2,
+        weak_reacquisition_minimum_size=8.0,
+        weak_support_radius_pixels=35.0,
+        maximum_trajectory_support_frames=max(1, int(round(fps))),
+        player_activity_radius_pixels=90.0,
+        minimum_activity_players=2,
+        remote_weak_player_contact_lock_frames=max(1, int(round(fps * 3.0))),
+        player_proximity_weight=0.25,
+        maximum_player_activity_support_frames=max(1, int(round(fps * 0.75))),
+        contact_speed_multiplier=1.25,
+        unrestricted_reacquisition_after_frames=max(300, int(round(fps * 10.0))),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Eerste QA-versie voor baldetectie en korte baltracking.")
     parser.add_argument("--video", required=True, help="Bestandsnaam in videos/ of volledig pad.")
     parser.add_argument("--seconds", type=float, default=30.0, help="Aantal testseconden.")
     parser.add_argument("--threshold", type=float, default=0.05, help="Minimale ruwe balconfidence.")
+    parser.add_argument(
+        "--reuse-candidates",
+        action="store_true",
+        help="Sla detectorinferentie over en laad de eerder opgeslagen kandidaatcache.",
+    )
     args = parser.parse_args()
 
     video_path = Path(args.video)
@@ -123,142 +260,126 @@ def main() -> None:
     output_path = output_dir / f"{video_path.stem}_ball_qa.mp4"
     raw_path = output_dir / f"{video_path.stem}_ball_qa_raw.mp4"
     report_path = output_dir / f"{video_path.stem}_ball_tracking.json"
+    candidate_cache_path = output_dir / f"{video_path.stem}_ball_candidates.json"
 
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise RuntimeError(f"Video kon niet worden geopend: {video_path}")
-    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-    maximum_frames = int(max(0.0, args.seconds) * fps)
-    detector = FootballDetector(player_threshold=0.20, ball_threshold=args.threshold)
-    frame_candidates = []
-    frame_player_footpoints = []
-    frame_player_boxes = []
-    frame_transforms: list[np.ndarray] = []
-    camera_motion = OnlineCameraMotion()
-    local_search_center: tuple[float, float] | None = None
-    frame_number = 0
+    if args.reuse_candidates:
+        if not candidate_cache_path.exists():
+            raise FileNotFoundError(f"Kandidaatcache niet gevonden: {candidate_cache_path}")
+        (
+            cached_source_video,
+            fps,
+            frame_candidates,
+            frame_player_footpoints,
+            frame_player_boxes,
+            frame_transforms,
+            accepted_camera_updates,
+            rejected_camera_updates,
+        ) = _load_candidate_cache(candidate_cache_path)
+        if Path(cached_source_video).resolve() != video_path.resolve():
+            raise ValueError("Kandidaatcache hoort bij een andere bronvideo")
+        frame_number = len(frame_candidates)
+        print(f"FASE 1/2 - {frame_number} frames uit kandidaatcache geladen")
+    else:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Video kon niet worden geopend: {video_path}")
+        fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+        maximum_frames = int(max(0.0, args.seconds) * fps)
+        detector = FootballDetector(player_threshold=0.20, ball_threshold=args.threshold)
+        frame_candidates = []
+        frame_player_footpoints = []
+        frame_player_boxes = []
+        frame_transforms = []
+        camera_motion = OnlineCameraMotion()
+        local_search_center: tuple[float, float] | None = None
+        frame_number = 0
 
-    print("FASE 1/2 - Video analyseren en balkandidaten verzamelen")
-    try:
-        while frame_number < maximum_frames:
-            success, frame = capture.read()
-            if not success:
-                break
-            current_to_reference = camera_motion.update(frame)
-            frame_transforms.append(current_to_reference.copy())
-            _, people, ball_detections = detector.detect(frame)
-            candidates = candidates_from_detections(ball_detections)
-            local_candidates: list[BallCandidate] = []
-            if local_search_center is not None:
-                local_candidates = _local_ball_candidates(
-                    detector,
-                    frame,
-                    local_search_center,
-                )
-                local_anchor = best_local_search_anchor(
-                    local_candidates,
-                    local_search_center,
-                )
-                if local_anchor is not None:
-                    local_search_center = local_anchor.center
-            candidates.extend(local_candidates)
-            candidates = exclude_candidates_inside_people(candidates, people.xyxy)
-            if local_search_center is None:
-                initial_anchors = [
-                    candidate
-                    for candidate in candidates
-                    if candidate.confidence >= 0.50
-                ]
-                if initial_anchors:
-                    local_search_center = max(
-                        initial_anchors,
-                        key=lambda candidate: candidate.confidence,
-                    ).center
-            frame_candidates.append(
-                tuple(
-                    _candidate_to_reference(candidate, current_to_reference)
-                    for candidate in candidates
-                )
-            )
-            frame_player_footpoints.append(
-                tuple(
-                    transform_point(
-                        ((float(x1) + float(x2)) / 2.0, float(y2)),
-                        current_to_reference,
+        print("FASE 1/2 - Video analyseren en balkandidaten verzamelen")
+        try:
+            while frame_number < maximum_frames:
+                success, frame = capture.read()
+                if not success:
+                    break
+                current_to_reference = camera_motion.update(frame)
+                frame_transforms.append(current_to_reference.copy())
+                _, people, ball_detections = detector.detect(frame)
+                candidates = candidates_from_detections(ball_detections)
+                local_candidates: list[BallCandidate] = []
+                if local_search_center is not None:
+                    local_candidates = _local_ball_candidates(
+                        detector,
+                        frame,
+                        local_search_center,
                     )
-                    for x1, y1, x2, y2 in people.xyxy
-                )
-            )
-            frame_player_boxes.append(
-                tuple(
-                    transform_box(
-                        tuple(float(value) for value in box),
-                        current_to_reference,
+                    local_anchor = best_local_search_anchor(
+                        local_candidates,
+                        local_search_center,
                     )
-                    for box in people.xyxy
+                    if local_anchor is not None:
+                        local_search_center = local_anchor.center
+                candidates.extend(local_candidates)
+                candidates = exclude_candidates_inside_people(candidates, people.xyxy)
+                if local_search_center is None:
+                    initial_anchors = [
+                        candidate
+                        for candidate in candidates
+                        if candidate.confidence >= 0.50
+                    ]
+                    if initial_anchors:
+                        local_search_center = max(
+                            initial_anchors,
+                            key=lambda candidate: candidate.confidence,
+                        ).center
+                frame_candidates.append(
+                    tuple(
+                        _candidate_to_reference(candidate, current_to_reference)
+                        for candidate in candidates
+                    )
                 )
-            )
-            frame_number += 1
-            if frame_number % 30 == 0:
-                print(f"Analyse {frame_number}/{maximum_frames} frames")
-    finally:
-        capture.release()
+                frame_player_footpoints.append(
+                    tuple(
+                        transform_point(
+                            ((float(x1) + float(x2)) / 2.0, float(y2)),
+                            current_to_reference,
+                        )
+                        for x1, y1, x2, y2 in people.xyxy
+                    )
+                )
+                frame_player_boxes.append(
+                    tuple(
+                        transform_box(
+                            tuple(float(value) for value in box),
+                            current_to_reference,
+                        )
+                        for box in people.xyxy
+                    )
+                )
+                frame_number += 1
+                if frame_number % 30 == 0:
+                    print(f"Analyse {frame_number}/{maximum_frames} frames")
+        finally:
+            capture.release()
+        accepted_camera_updates = camera_motion.accepted_updates
+        rejected_camera_updates = camera_motion.rejected_updates
+        _save_candidate_cache(
+            candidate_cache_path,
+            source_video=video_path,
+            fps=fps,
+            frame_candidates=frame_candidates,
+            frame_player_footpoints=frame_player_footpoints,
+            frame_player_boxes=frame_player_boxes,
+            frame_transforms=frame_transforms,
+            accepted_camera_updates=accepted_camera_updates,
+            rejected_camera_updates=rejected_camera_updates,
+        )
+        print(f"Kandidaatcache: {candidate_cache_path}")
 
     if frame_number == 0:
         raise RuntimeError("Geen videoframes verwerkt.")
 
-    tracker = BallTracker(
-        maximum_gap_frames=5,
-        maximum_jump_pixels=70.0,
-        confidence_weight=0.25,
-        acquisition_confidence=0.50,
-        # In de openingsboog verschijnt de echte bal na een kort gat opnieuw
-        # met 41% confidence, op vrijwel dezelfde positie als het laatst
-        # bewezen spoor. Dat is sterke trajectsteun, ook al blijft het net
-        # onder de zelfstandige acquisitiedrempel van 50%. Verre kandidaten
-        # vallen nog steeds onder de bevestigde heracquisitielogica.
-        strong_reacquisition_confidence=0.30,
-        supporting_confidence=0.15,
-        # Een verre herstart onder 30% bleek op echte beelden ondanks
-        # temporele en spelerssteun nog spelershoofden en trainingskegels als
-        # bal te bevestigen. Zo'n zwakke hit mag daarom geen nieuw fysiek anker
-        # worden; lokale baansteun kan de CLI-drempel wel blijven gebruiken.
-        weak_reacquisition_confidence=args.threshold,
-        remote_weak_reacquisition_confidence=max(args.threshold, 0.30),
-        remote_weak_reacquisition_after_frames=max(1, int(round(fps * 0.5))),
-        # Een verre zwakke kandidaat bij slechts een speler bleek in de
-        # referentieclip ook een stilstaand kleding-/veld-detail te kunnen
-        # zijn (o.a. de foutieve spoorwissel rond frame 104). Vereis daarom
-        # opnieuw een lokale spelsituatie met minstens twee spelers. Een
-        # sterke detectie kan nog steeds zelfstandig heracquireren.
-        weak_reacquisition_minimum_players=2,
-        # In drukke amateurbeelden is de zichtbare bal in het volledige frame
-        # soms slechts 8-12 pixels breed. Meerframe- en spelerssteun bewaken de
-        # herstart; een harde 12px-grens verwijderde de echte duelbal.
-        weak_reacquisition_minimum_size=8.0,
-        weak_support_radius_pixels=35.0,
-        # Een kleine bal op afstand mag ongeveer één seconde lang met zwakke,
-        # maar baan-consistente detecties zichtbaar blijven. Die detecties
-        # kunnen het bewezen traject niet verplaatsen of opnieuw starten.
-        maximum_trajectory_support_frames=max(1, int(round(fps))),
-        # Gebruik de al beschikbare spelersposities alleen als goedkope steun
-        # voor een bestaande balbaan. Hiervoor draait geen extra AI-model.
-        player_activity_radius_pixels=90.0,
-        minimum_activity_players=2,
-        # Een bewezen bal aan een spelersvoet blijft bij zwakke, verre
-        # concurrenten drie seconden leidend. Een sterke detectie of lokale
-        # voortzetting wordt hierdoor niet geblokkeerd.
-        remote_weak_player_contact_lock_frames=max(1, int(round(fps * 3.0))),
-        # Bij meerdere sterke ballen is nabijheid van het actuele spel een
-        # begrensde tie-breaker. Een duidelijk sterkere bal in vrije vlucht
-        # blijft winnen.
-        player_proximity_weight=0.25,
-        maximum_player_activity_support_frames=max(1, int(round(fps * 0.75))),
-        contact_speed_multiplier=1.25,
-        # Tijdens een korte analyse mag een verre, nieuwe kandidaat de eenmaal
-        # bewezen bal nooit stilzwijgend vervangen. Na langdurig verlies is een
-        # gecontroleerde herstart nog steeds mogelijk.
-        unrestricted_reacquisition_after_frames=max(300, int(round(fps * 10.0))),
+    tracker = _build_tracker(
+        fps,
+        args.threshold,
     )
     observations_by_frame = {}
     for analyzed_frame, candidates in enumerate(frame_candidates):
@@ -356,8 +477,8 @@ def main() -> None:
     print(f"Stilstaand vastgehouden: {stationary_frames}/{frame_number} frames")
     print(
         "Camerastabilisatie: "
-        f"{camera_motion.accepted_updates} gekoppeld | "
-        f"{camera_motion.rejected_updates} overgeslagen"
+        f"{accepted_camera_updates} gekoppeld | "
+        f"{rejected_camera_updates} overgeslagen"
     )
     print(f"Totale zichtbaarheid: {coverage:.1%}")
     print(f"QA-video: {output_path}")

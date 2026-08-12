@@ -6,8 +6,8 @@ from football_ai.classification.goal_window_candidates import (
 )
 
 
-def _person(frame, x, proximity):
-    return GoalWindowPerson(frame, (x, 100.0), proximity, (x - 5, 50, x + 5, 100))
+def _person(frame, x, proximity, shirt=None):
+    return GoalWindowPerson(frame, (x, 100.0), proximity, (x - 5, 50, x + 5, 100), shirt)
 
 
 def test_prefers_continuous_person_over_single_nearer_defender():
@@ -23,6 +23,19 @@ def test_prefers_continuous_person_over_single_nearer_defender():
 def test_empty_or_incomplete_window_has_no_path():
     assert select_continuous_goal_person((), frame_diagonal=1000) == ()
     assert select_continuous_goal_person(((_person(1, 1, .8),), ()), frame_diagonal=1000) == ()
+
+
+def test_rejects_smooth_switch_to_different_shirt_colour():
+    red = (1.0, 0.0)
+    blue = (0.0, 1.0)
+    keeper = (_person(1, 100, .8, red), _person(2, 112, .75, red), _person(3, 124, .75, red))
+    frames = (
+        (keeper[0],),
+        (_person(2, 102, .99, blue), keeper[1]),
+        (_person(3, 104, .99, blue), keeper[2]),
+    )
+
+    assert select_continuous_goal_person(frames, frame_diagonal=1000) == keeper
 
 
 def test_classifies_smooth_near_goal_path_as_review_candidate():

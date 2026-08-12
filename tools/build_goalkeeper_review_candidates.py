@@ -47,6 +47,7 @@ def main() -> None:
                     GoalWindowPerson(
                         int(record["frame_number"]), tuple(candidate["footpoint"]),
                         float(candidate["goal_proximity_score"]), tuple(candidate["box"]),
+                        _shirt_feature(capture, int(record["frame_number"]), candidate["box"]),
                     )
                     for candidate in record["candidates"]
                 )
@@ -133,6 +134,20 @@ def _appearance_distances(
     median = np.median(np.stack(features), axis=0)
     median /= max(float(np.linalg.norm(median)), 1e-9)
     return tuple(float(np.linalg.norm(item - median)) for item in features)
+
+
+def _shirt_feature(capture, frame_number, box):
+    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    success, frame = capture.read()
+    if not success:
+        return None
+    feature = extract_shirt_feature(frame, np.asarray(box, dtype=np.float64))
+    if feature is None:
+        return None
+    norm = float(np.linalg.norm(feature))
+    if norm <= 0:
+        return None
+    return tuple(map(float, feature / norm))
 
 
 if __name__ == "__main__":

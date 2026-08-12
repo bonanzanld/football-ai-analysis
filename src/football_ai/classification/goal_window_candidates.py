@@ -10,6 +10,7 @@ class GoalWindowPerson:
     footpoint: tuple[float, float]
     goal_proximity_score: float
     box: tuple[float, float, float, float]
+    shirt_feature: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +69,12 @@ def select_continuous_goal_person(
     *,
     frame_diagonal: float,
     maximum_step_ratio: float = 0.08,
+    maximum_shirt_distance: float = 0.50,
+    shirt_distance_weight: float = 2.0,
 ) -> tuple[GoalWindowPerson, ...]:
     """Select one smooth near-goal path without assigning the keeper role."""
-    if frame_diagonal <= 0 or maximum_step_ratio <= 0:
-        raise ValueError("Frame diagonal and maximum step ratio must be positive")
+    if frame_diagonal <= 0 or maximum_step_ratio <= 0 or maximum_shirt_distance <= 0:
+        raise ValueError("Frame diagonal, movement and shirt thresholds must be positive")
     if not frames or any(not frame for frame in frames):
         return ()
     costs = [-item.goal_proximity_score for item in frames[0]]
@@ -89,6 +92,13 @@ def select_continuous_goal_person(
                 transition = distance_ratio / maximum_step_ratio
                 if distance_ratio > maximum_step_ratio:
                     transition += 4.0
+                shirt_distance = _shirt_distance(other, candidate)
+                if shirt_distance is not None:
+                    # A clear colour break is much stronger evidence of an
+                    # identity switch than spatial smoothness is of identity.
+                    transition += shirt_distance_weight * shirt_distance
+                    if shirt_distance > maximum_shirt_distance:
+                        transition += 8.0
                 options.append(costs[index] + transition - candidate.goal_proximity_score)
             parent = min(range(len(options)), key=options.__getitem__)
             next_parents.append(parent)
@@ -101,3 +111,13 @@ def select_continuous_goal_person(
         index = parents[frame_index][index]
         path.append(frames[frame_index][index])
     return tuple(reversed(path))
+
+
+def _shirt_distance(first: GoalWindowPerson, second: GoalWindowPerson) -> float | None:
+    if first.shirt_feature is None or second.shirt_feature is None:
+        return None
+    if len(first.shirt_feature) != len(second.shirt_feature):
+        return None
+    return sum(
+        (left - right) ** 2 for left, right in zip(first.shirt_feature, second.shirt_feature)
+    ) ** 0.5

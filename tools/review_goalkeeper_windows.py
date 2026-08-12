@@ -26,9 +26,17 @@ def main() -> None:
         if item["quality"]["classification"] == "consistent_review_candidate"
     ]
     previous = json.loads(answer_path.read_text(encoding="utf-8")) if answer_path.exists() else {"reviews": []}
+    candidate_signatures = {
+        (item["goal"], float(item["start_seconds"]), float(item["end_seconds"])):
+        _candidate_signature(item)
+        for item in candidates
+    }
     answers = {
-        (item["goal"], float(item["start_seconds"]), float(item["end_seconds"])): item
+        key: item
         for item in previous.get("reviews", ())
+        if (key := (item["goal"], float(item["start_seconds"]), float(item["end_seconds"])))
+        in candidate_signatures
+        and item.get("candidate_signature") == candidate_signatures[key]
     }
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
@@ -100,6 +108,7 @@ def _render(capture, candidate, index, total, answers, view):
         ok, frame = capture.read()
         if not ok:
             frame = np.zeros((720, 1280, 3), np.uint8)
+        view["frame_size"] = (frame.shape[1], frame.shape[0])
         box = np.round(item["box"]).astype(int)
         cv2.rectangle(frame, tuple(box[:2]), tuple(box[2:]), (0, 255, 255), 5)
         cv2.circle(frame, tuple(np.round(item["footpoint"]).astype(int)), 8, (255, 0, 255), -1)
@@ -133,7 +142,7 @@ def _crop(frame, view):
 def _pan(view, dx, dy):
     if view["zoom"] <= 1.0:
         return
-    width, height = 1280.0, 720.0
+    width, height = map(float, view.get("frame_size", (1280.0, 720.0)))
     crop_width, crop_height = width / view["zoom"], height / view["zoom"]
     center_x, center_y = view["center"] or (width / 2.0, height / 2.0)
     view["center"] = (
@@ -147,7 +156,17 @@ def _answer(answers, candidate, answer):
     answers[key] = {
         "goal": key[0], "start_seconds": key[1], "end_seconds": key[2], "answer": answer,
         "review_semantics": "keeper means selected person is correct goalkeeper in all three displayed frames",
+        "candidate_signature": _candidate_signature(candidate),
     }
+
+
+def _candidate_signature(candidate):
+    path = candidate["path"]
+    samples = (path[0], path[len(path) // 2], path[-1])
+    return "|".join(
+        f"{int(item['frame_number'])}:" + ",".join(f"{float(value):.2f}" for value in item["box"])
+        for item in samples
+    )
 
 
 def _save(path, video_name, answers):

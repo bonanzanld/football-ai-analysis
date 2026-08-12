@@ -1,5 +1,6 @@
 from football_ai.classification.goal_window_candidates import (
     GoalWindowPerson,
+    appearance_stability_classification,
     evaluate_goal_person_path,
     select_continuous_goal_person,
 )
@@ -29,3 +30,9 @@ def test_classifies_smooth_near_goal_path_as_review_candidate():
     quality = evaluate_goal_person_path(path, frame_diagonal=1000)
     assert quality.classification == "consistent_review_candidate"
     assert quality.maximum_step_ratio == .002
+
+
+def test_appearance_stability_is_only_available_with_three_samples():
+    assert appearance_stability_classification((.1, .2)) == "insufficient_evidence"
+    assert appearance_stability_classification((.1, .2, .3, .9)) == "stable"
+    assert appearance_stability_classification((.4, .5, .6)) == "unstable"

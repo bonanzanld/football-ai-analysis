@@ -16,9 +16,11 @@ if str(SRC) not in sys.path:
 
 from football_ai.classification.goal_window_candidates import (
     GoalWindowPerson,
+    appearance_stability_classification,
     evaluate_goal_person_path,
     select_continuous_goal_person,
 )
+from football_ai.classification.color_features import extract_shirt_feature
 
 
 def main() -> None:
@@ -35,7 +37,6 @@ def main() -> None:
     if not capture.isOpened():
         raise FileNotFoundError(video)
     diagonal = float(np.hypot(capture.get(cv2.CAP_PROP_FRAME_WIDTH), capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-    capture.release()
 
     windows = []
     for goal in ("A", "B"):
@@ -53,6 +54,11 @@ def main() -> None:
             )
             path = select_continuous_goal_person(frames, frame_diagonal=diagonal)
             quality = evaluate_goal_person_path(path, frame_diagonal=diagonal)
+            appearance_distances = _appearance_distances(capture, path)
+            appearance = appearance_stability_classification(appearance_distances)
+            classification = quality.classification
+            if classification == "consistent_review_candidate" and appearance == "unstable":
+                classification = "ambiguous"
             windows.append({
                 "goal": goal,
                 "start_seconds": float(group[0]["time_seconds"]),
@@ -62,7 +68,10 @@ def main() -> None:
                     "mean_goal_proximity": quality.mean_goal_proximity,
                     "maximum_step_ratio": quality.maximum_step_ratio,
                     "mean_step_ratio": quality.mean_step_ratio,
-                    "classification": quality.classification,
+                    "classification": classification,
+                    "motion_classification": quality.classification,
+                    "appearance_classification": appearance,
+                    "appearance_median_distance": float(np.median(appearance_distances)) if appearance_distances else None,
                 },
                 "path": [
                     {"frame_number": item.frame_number, "footpoint": item.footpoint,
@@ -70,6 +79,7 @@ def main() -> None:
                     for item in path
                 ],
             })
+    capture.release()
     payload = {
         "schema_version": 1,
         "video_name": video.name,
@@ -100,6 +110,29 @@ def _groups(records: list[dict], maximum_gap: float) -> tuple[tuple[dict, ...], 
         current.append(item)
     groups.append(tuple(current))
     return tuple(groups)
+
+
+def _appearance_distances(
+    capture: cv2.VideoCapture,
+    path: tuple[GoalWindowPerson, ...],
+) -> tuple[float, ...]:
+    features = []
+    for item in path:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, item.frame_number)
+        success, frame = capture.read()
+        if not success:
+            continue
+        feature = extract_shirt_feature(frame, np.asarray(item.box, dtype=np.float64))
+        if feature is None:
+            continue
+        norm = float(np.linalg.norm(feature))
+        if norm > 0:
+            features.append(feature / norm)
+    if not features:
+        return ()
+    median = np.median(np.stack(features), axis=0)
+    median /= max(float(np.linalg.norm(median)), 1e-9)
+    return tuple(float(np.linalg.norm(item - median)) for item in features)
 
 
 if __name__ == "__main__":

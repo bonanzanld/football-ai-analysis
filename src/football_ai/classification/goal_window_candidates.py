@@ -21,6 +21,22 @@ class GoalPersonPathQuality:
     classification: str
 
 
+def appearance_stability_classification(
+    distances_to_median: tuple[float, ...],
+    *,
+    maximum_median_distance: float = 0.35,
+) -> str:
+    """Use within-window appearance only as a veto, never as identity proof."""
+    if maximum_median_distance <= 0:
+        raise ValueError("Maximum median distance must be positive")
+    if len(distances_to_median) < 3:
+        return "insufficient_evidence"
+    values = sorted(float(item) for item in distances_to_median)
+    middle = len(values) // 2
+    median = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2.0
+    return "stable" if median <= maximum_median_distance else "unstable"
+
+
 def evaluate_goal_person_path(
     path: tuple[GoalWindowPerson, ...],
     *,

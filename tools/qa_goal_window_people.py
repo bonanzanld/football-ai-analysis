@@ -14,7 +14,11 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from football_ai.classification.goalkeeper_classifier import GoalLineReference, goal_line_proximity_score
+from football_ai.classification.goalkeeper_classifier import (
+    GoalLineReference,
+    goal_line_proximity_score,
+    is_on_pitch_side_of_goal_line,
+)
 from football_ai.detector import FootballDetector
 
 
@@ -48,10 +52,13 @@ def main() -> None:
             line = GoalLineReference(
                 str(goal["goal"]), tuple(goal["ground_points"][0]), tuple(goal["ground_points"][1])
             )
+            pitch_reference = (frame.shape[1] / 2.0, float(frame.shape[0] - 1))
             candidates = []
             confidences = people.confidence if people.confidence is not None else np.ones(len(people))
             for box, confidence in zip(people.xyxy, confidences):
                 footpoint = (float((box[0] + box[2]) / 2.0), float(box[3]))
+                if not is_on_pitch_side_of_goal_line(footpoint, line, pitch_reference):
+                    continue
                 score = goal_line_proximity_score(footpoint, line, maximum_distance)
                 if score <= 0.0:
                     continue

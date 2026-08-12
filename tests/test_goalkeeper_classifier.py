@@ -9,10 +9,16 @@ from football_ai.classification.goalkeeper_classifier import (
     GoalLineReference,
     defensive_depth_score,
     goal_line_proximity_score,
+    is_on_pitch_side_of_goal_line,
 )
 
 
 class GoalkeeperClassifierTests(unittest.TestCase):
+    def test_rejects_person_behind_goal_line(self) -> None:
+        goal = GoalLineReference("A", (100.0, 100.0), (200.0, 100.0))
+        self.assertTrue(is_on_pitch_side_of_goal_line((150.0, 140.0), goal, (640.0, 720.0)))
+        self.assertFalse(is_on_pitch_side_of_goal_line((150.0, 80.0), goal, (640.0, 720.0)))
+
     def test_combined_evidence_creates_keeper_candidate(self) -> None:
         result = GoalkeeperClassifier().assess(
             GoalkeeperEvidence(7, 0, 0.85, 0.80, 1.0, 0.90)

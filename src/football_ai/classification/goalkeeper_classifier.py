@@ -134,6 +134,29 @@ def goal_line_proximity_score(
     return max(0.0, 1.0 - distance / maximum_distance_pixels)
 
 
+def is_on_pitch_side_of_goal_line(
+    footpoint: Point,
+    goal_line: GoalLineReference,
+    pitch_reference_point: Point,
+    *,
+    tolerance_pixels: float = 3.0,
+) -> bool:
+    """Reject people behind a goal line before goalkeeper ranking."""
+    if tolerance_pixels < 0.0:
+        raise ValueError("tolerance_pixels must not be negative")
+    ax, ay = goal_line.first_post
+    bx, by = goal_line.second_post
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length <= 1e-9:
+        raise ValueError("Goal posts must not coincide")
+    reference_side = (dx * (pitch_reference_point[1] - ay) - dy * (pitch_reference_point[0] - ax)) / length
+    point_side = (dx * (footpoint[1] - ay) - dy * (footpoint[0] - ax)) / length
+    if abs(reference_side) <= tolerance_pixels:
+        raise ValueError("Pitch reference point lies on the goal line")
+    return point_side * (1.0 if reference_side > 0.0 else -1.0) >= -tolerance_pixels
+
+
 def defensive_depth_score(
     candidate_footpoint: Point,
     teammate_footpoints: Iterable[Point],

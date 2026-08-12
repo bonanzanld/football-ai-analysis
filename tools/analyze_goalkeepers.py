@@ -12,6 +12,7 @@ if str(SRC_PATH) not in sys.path:
 
 from football_ai.classification.goalkeeper_analysis import (
     analyze_goalkeeper_candidates,
+    load_tracked_goal_references,
     save_goalkeeper_analysis,
     shortlist_goalkeeper_assessments,
 )
@@ -37,9 +38,18 @@ def main() -> None:
         raise FileNotFoundError(
             f"Entity-review ontbreekt: {manifest_path}. Draai eerst tools/analyze_entities.py."
         )
+    goal_tracking_path = (
+        PROJECT_ROOT / "output" / "pitch_bootstrap" /
+        f"{video_path.stem}_8v8_anchored_goal_tracking_qa.json"
+    )
+    tracked_goals = (
+        load_tracked_goal_references(goal_tracking_path)
+        if goal_tracking_path.exists() else ()
+    )
     report = analyze_goalkeeper_candidates(
         video_path,
         load_entity_review_manifest(manifest_path),
+        tracked_goals,
     )
     output_path = entity_dir / f"{video_path.stem}_goalkeeper_candidates.json"
     save_goalkeeper_analysis(report, output_path)
@@ -53,7 +63,7 @@ def main() -> None:
             f"Track {item.track_id} | {team} | {item.decision.value} | "
             f"score {item.score:.0%} | {reasons}"
         )
-    print("Doelreferentie: niet nodig voor deze keeperselectie.")
+    print(f"Dynamische doelreferenties: {len(tracked_goals)}")
     print(f"Keeperrapport: {output_path}")
 
 

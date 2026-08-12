@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import json
 
 import numpy as np
 
@@ -9,6 +12,7 @@ from football_ai.classification.goalkeeper_analysis import (
     _spatial_evidence,
     _uniform_outlier_score,
     shortlist_goalkeeper_assessments,
+    load_tracked_goal_references,
 )
 from football_ai.classification.goalkeeper_goal_reference import GoalkeeperGoalReference
 from football_ai.tracking.entity_review_manifest import (
@@ -24,6 +28,19 @@ from football_ai.classification.goalkeeper_classifier import (
 
 
 class GoalkeeperAnalysisTests(unittest.TestCase):
+    def test_loads_dynamic_goal_tracking_as_frame_references(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "goals.json"
+            path.write_text(json.dumps({"records": [{
+                "frame_number": 120,
+                "goal": "B",
+                "ground_points": [[10, 20], [40, 22]],
+            }]}), encoding="utf-8")
+            result = load_tracked_goal_references(path)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].goal_id, "B")
+        self.assertEqual(result[0].first_ground, (10.0, 20.0))
+
     def test_matching_uniform_has_low_outlier_score(self) -> None:
         feature = np.asarray([0.5, 0.5], dtype=np.float32)
         self.assertEqual(_uniform_outlier_score(feature, feature, 0.1), 0.0)
@@ -78,6 +95,24 @@ class GoalkeeperAnalysisTests(unittest.TestCase):
             720.0,
         )
         self.assertEqual(goal_score, 0.0)
+        self.assertEqual(depth_score, 0.0)
+
+    def test_unassigned_track_can_use_goal_proximity_but_not_team_depth(self) -> None:
+        track = ReviewTrack(
+            track_id=8,
+            first_frame=30,
+            last_frame=30,
+            frames_seen=1,
+            average_confidence=0.9,
+            observations=(ReviewObservation(30, (90.0, 50.0, 110.0, 100.0)),),
+            final_team_id=None,
+        )
+        manifest = EntityReviewManifest("test.mp4", 30.0, (track,))
+        goal = GoalkeeperGoalReference(30, 1.0, 0, (90.0, 100.0), (110.0, 100.0))
+
+        goal_score, depth_score = _spatial_evidence(track, manifest, (goal,), 1280.0, 720.0)
+
+        self.assertEqual(goal_score, 1.0)
         self.assertEqual(depth_score, 0.0)
 
     def test_relative_movement_compensates_shared_camera_motion(self) -> None:

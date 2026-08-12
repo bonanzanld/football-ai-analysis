@@ -28,6 +28,33 @@ class GoalFrameReference(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class TrackedGoalFrameReference:
+    frame_number: int
+    goal_id: str
+    first_ground: tuple[float, float]
+    second_ground: tuple[float, float]
+
+
+def load_tracked_goal_references(path: Path) -> tuple[TrackedGoalFrameReference, ...]:
+    """Load accepted dynamic goal lines produced by anchored-goal QA."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    references = []
+    for item in payload.get("records", ()):
+        points = item.get("ground_points", ())
+        if len(points) != 2:
+            continue
+        references.append(
+            TrackedGoalFrameReference(
+                int(item["frame_number"]),
+                str(item["goal"]),
+                tuple(map(float, points[0])),
+                tuple(map(float, points[1])),
+            )
+        )
+    return tuple(references)
+
+
+@dataclass(frozen=True, slots=True)
 class GoalkeeperAnalysisReport:
     source_video: str
     assessments: tuple[GoalkeeperAssessment, ...]
@@ -234,13 +261,17 @@ def _spatial_evidence(
     frame_width: float,
     frame_height: float,
 ) -> tuple[float, float]:
-    if not goal_seeds or track.final_team_id not in (0, 1):
+    if not goal_seeds:
         return 0.0, 0.0
-    relevant_goals = tuple(
-        reference
-        for reference in goal_seeds
-        if getattr(reference, "defending_team_id", track.final_team_id)
-        == track.final_team_id
+    relevant_goals = (
+        tuple(
+            reference
+            for reference in goal_seeds
+            if getattr(reference, "defending_team_id", track.final_team_id)
+            == track.final_team_id
+        )
+        if track.final_team_id in (0, 1)
+        else tuple(goal_seeds)
     )
     if not relevant_goals:
         return 0.0, 0.0
@@ -259,6 +290,8 @@ def _spatial_evidence(
         footpoint = _footpoint(observation.box)
         goal_scores.append(goal_line_proximity_score(footpoint, goal, maximum_distance))
         teammates = []
+        if track.final_team_id not in (0, 1):
+            continue
         for other in manifest.tracks:
             if other is track or other.final_team_id != track.final_team_id:
                 continue

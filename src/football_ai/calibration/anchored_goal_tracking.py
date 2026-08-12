@@ -16,6 +16,31 @@ class AnchoredGoalProjection:
     valid: bool
 
 
+def contiguous_goal_windows(
+    times_seconds: tuple[float, ...],
+    *,
+    maximum_gap_seconds: float,
+) -> tuple[tuple[float, float, int], ...]:
+    """Group accepted samples into deterministic local tracking windows."""
+    if maximum_gap_seconds <= 0:
+        raise ValueError("Maximum gap must be positive")
+    times = sorted(set(float(item) for item in times_seconds))
+    if not times:
+        return ()
+    windows = []
+    start = previous = times[0]
+    count = 1
+    for current in times[1:]:
+        if current - previous > maximum_gap_seconds:
+            windows.append((start, previous, count))
+            start, count = current, 1
+        else:
+            count += 1
+        previous = current
+    windows.append((start, previous, count))
+    return tuple(windows)
+
+
 def project_anchored_goal(
     ground_points: tuple[tuple[float, float], tuple[float, float]],
     top_points: tuple[tuple[float, float], tuple[float, float]],

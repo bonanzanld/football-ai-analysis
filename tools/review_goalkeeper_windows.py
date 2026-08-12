@@ -110,7 +110,7 @@ def _render(capture, candidate, index, total, answers, view):
     current = answers.get(key, {}).get("answer", "nog niet beoordeeld")
     lines = (
         f"Traject {index + 1}/{total} | Doel {candidate['goal']} | {candidate['start_seconds']:.1f}-{candidate['end_seconds']:.1f}s",
-        "Is de GELE persoon in alle drie beelden dezelfde keeper?",
+        "KIES KEEPER ALLEEN als de GELE persoon in ALLE 3 beelden de juiste keeper is.",
         "K of 1 = KEEPER    N of 2 = GEEN KEEPER    U of 3 = ONZEKER",
         f"Huidig: {current} | zoom {view['zoom']:.1f}x | ,/. navigeren | Esc = bewaren en stoppen",
         "Muiswiel of +/- = zoom | pijltjes of W/A/S/D = bewegen | 0 = volledig beeld",
@@ -144,12 +144,20 @@ def _pan(view, dx, dy):
 
 def _answer(answers, candidate, answer):
     key = (candidate["goal"], float(candidate["start_seconds"]), float(candidate["end_seconds"]))
-    answers[key] = {"goal": key[0], "start_seconds": key[1], "end_seconds": key[2], "answer": answer}
+    answers[key] = {
+        "goal": key[0], "start_seconds": key[1], "end_seconds": key[2], "answer": answer,
+        "review_semantics": "keeper means selected person is correct goalkeeper in all three displayed frames",
+    }
 
 
 def _save(path, video_name, answers):
     reviews = sorted(answers.values(), key=lambda item: (item["goal"], item["start_seconds"]))
-    path.write_text(json.dumps({"schema_version": 1, "video_name": video_name, "human_reviewed": True, "reviews": reviews}, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({
+        "schema_version": 2, "video_name": video_name, "human_reviewed": True,
+        "keeper_answer_requires": "correct selected goalkeeper in all three displayed frames",
+        "not_keeper_semantics": "three-of-three condition failed; failing frame is unknown",
+        "reviews": reviews,
+    }, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

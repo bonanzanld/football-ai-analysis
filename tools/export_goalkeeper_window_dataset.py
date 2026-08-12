@@ -26,8 +26,7 @@ def main() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     positives = sum(item["label"] == "goalkeeper" for item in payload["examples"])
-    negatives = sum(item["label"] == "not_goalkeeper" for item in payload["examples"])
-    print(f"Keepervoorbeelden: {positives} positief | {negatives} geselecteerd-negatief")
+    print(f"Keepervoorbeelden: {positives} positief (alleen daadwerkelijk getoonde 3-uit-3-beelden) | 0 negatief")
     print(f"Datasetmanifest: {path}")
 
 

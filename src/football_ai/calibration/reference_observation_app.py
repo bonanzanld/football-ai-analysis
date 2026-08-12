@@ -141,6 +141,10 @@ class ReferenceObservationApp:
         video_path: Path,
         seed: GoalSeed,
         reference: FootballFieldReference3D,
+        *,
+        existing_view: CameraViewObservations | None = None,
+        requested_landmarks: tuple[str, ...] | None = None,
+        replace_requested: bool = False,
     ) -> None:
         self.video_path = video_path
         self.seed = seed
@@ -155,11 +159,21 @@ class ReferenceObservationApp:
             raise RuntimeError(f"Frame {seed.frame_number} kon niet worden gelezen.")
         self.frame = frame
         goal = seed.goal_id.lower()
-        self.requested = (
+        self.requested = requested_landmarks or (
             f"goal_{goal}_rear_top",
             f"goal_{goal}_front_top",
         )
-        self.observations = list(prefill_goal_observations(seed))
+        initial = list(prefill_goal_observations(seed))
+        if existing_view is not None:
+            if existing_view.frame_number != seed.frame_number:
+                raise ValueError("Bestaande observaties horen niet bij hetzelfde referentieframe.")
+            by_id = {item.landmark_id: item for item in initial}
+            by_id.update({item.landmark_id: item for item in existing_view.observations})
+            initial = list(by_id.values())
+        if replace_requested:
+            requested = set(self.requested)
+            initial = [item for item in initial if item.landmark_id not in requested]
+        self.observations = initial
         self.skipped: list[str] = []
         self.index = 0
         self.zoom = 1.0
@@ -191,12 +205,32 @@ class ReferenceObservationApp:
                 self.zoom = max(1.0, self.zoom * 0.8)
             elif key == ord("0"):
                 self.zoom, self.zoom_center = 1.0, None
+            elif key in (2424832, 65361, 63234, ord("j"), ord("J")):
+                self._pan(-0.16, 0.0)
+            elif key in (2555904, 65363, 63235, ord("l"), ord("L")):
+                self._pan(0.16, 0.0)
+            elif key in (2490368, 65362, 63232, ord("i"), ord("I")):
+                self._pan(0.0, -0.16)
+            elif key in (2621440, 65364, 63233, ord("k"), ord("K")):
+                self._pan(0.0, 0.16)
             elif key in (10, 13):
                 if self.index < len(self.requested):
-                    self.status = "Werk eerst alle vier vragen af; gebruik S als een punt niet zichtbaar is."
+                    self.status = "Werk eerst alle vragen af; gebruik S als een punt niet zichtbaar is."
                     continue
                 cv2.destroyWindow(self.WINDOW)
                 return self._build_result()
+
+    def _pan(self, dx: float, dy: float) -> None:
+        if self.zoom <= 1.0:
+            self.status = "Zoom eerst in; bij volledig beeld is verplaatsen niet nodig."
+            return
+        height, width = self.frame.shape[:2]
+        view_width, view_height = width / self.zoom, height / self.zoom
+        center_x, center_y = self.zoom_center or (width / 2.0, height / 2.0)
+        self.zoom_center = (
+            float(np.clip(center_x + dx * view_width, view_width / 2.0, width - view_width / 2.0)),
+            float(np.clip(center_y + dy * view_height, view_height / 2.0, height - view_height / 2.0)),
+        )
 
     def _mouse(self, event: int, x: int, y: int, flags: int, _data: object) -> None:
         if event == cv2.EVENT_MOUSEWHEEL:
@@ -253,13 +287,14 @@ class ReferenceObservationApp:
                     continue
             if not candidates:
                 raise ValueError("Geen fysiek bruikbaar cameramodel gevonden.")
-            estimate = max(
-                candidates,
-                key=lambda item: field_direction_score(self.reference, item.projection, self.seed),
+            directionally_valid = tuple(
+                item
+                for item in candidates
+                if field_direction_score(self.reference, item.projection, self.seed) >= 0.75
             )
-            direction_score = field_direction_score(self.reference, estimate.projection, self.seed)
-            if direction_score < 0.75:
+            if not directionally_valid:
                 raise ValueError("Cameramodel volgt de twee bestaande zijlijnrichtingen onvoldoende.")
+            estimate = min(directionally_valid, key=lambda item: item.rms_error_px)
             field_ids = ("corner_a_rear", "corner_b_rear", "corner_b_front", "corner_a_front")
             field = np.asarray(
                 [estimate.projection.project(self.reference.landmark(item).point) for item in field_ids],
@@ -290,7 +325,7 @@ class ReferenceObservationApp:
             "",
             "Al bekend en zichtbaar in magenta:",
             "- beide paalvoeten",
-            "- beide hoeken van deze achterlijn",
+            "- eerder aangeklikte doel- en hoekpunten",
             "",
             f"Stap {min(self.index + 1, len(self.requested))}/{len(self.requested)}",
             self._instruction(),
@@ -299,6 +334,7 @@ class ReferenceObservationApp:
             "S = niet zichtbaar / overslaan",
             "U = laatste stap ongedaan",
             "Muiswiel of +/- = inzoomen",
+            "Pijltjes of I/J/K/L = beeld verplaatsen",
             "0 = volledig beeld",
             "Enter = afronden na alle vragen",
             "Esc = afbreken",
@@ -320,8 +356,12 @@ class ReferenceObservationApp:
             return "KLAAR: druk Enter om de geometrie te controleren."
         goal = self.seed.goal_id
         return {
+            f"goal_{goal.lower()}_rear_bottom": "Klik de VOET van de VERSTE doelpaal, exact waar paal en grond elkaar raken.",
+            f"goal_{goal.lower()}_front_bottom": "Klik de VOET van de DICHTSTBIJZIJNDE doelpaal, exact waar paal en grond elkaar raken.",
             f"goal_{goal.lower()}_rear_top": "Klik BOVENKANT van de VERSTE doelpaal.",
             f"goal_{goal.lower()}_front_top": "Klik BOVENKANT van de DICHTSTBIJZIJNDE doelpaal.",
+            f"corner_{goal.lower()}_rear": "Klik het VERSTE 8v8-hoekhoedje op deze achterlijn.",
+            f"corner_{goal.lower()}_front": "Klik het DICHTSTBIJZIJNDE 8v8-hoekhoedje op deze achterlijn.",
         }[self.requested[self.index]]
 
     def _draw_frame(self, canvas: np.ndarray) -> None:
@@ -379,6 +419,21 @@ def create_projection_preview(
     result: ObservationCollectionResult,
 ) -> np.ndarray:
     preview = frame.copy()
+    for observation in result.view.observations:
+        center = tuple(np.round(observation.image_point).astype(int))
+        cv2.drawMarker(
+            preview, center, (255, 0, 255), cv2.MARKER_TILTED_CROSS, 20, 3, cv2.LINE_AA
+        )
+        cv2.putText(
+            preview,
+            observation.landmark_id,
+            (center[0] + 9, center[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
     if result.estimate is None:
         cv2.rectangle(preview, (0, 0), (preview.shape[1], 70), (20, 20, 20), -1)
         cv2.putText(preview, f"GEEN OPLOSSING: {result.failure_reason}", (15, 43), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 255), 2, cv2.LINE_AA)

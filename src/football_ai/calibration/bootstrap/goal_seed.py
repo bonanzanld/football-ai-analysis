@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 from football_ai.calibration.bootstrap.goal_detection import measure_backline_support
 
@@ -28,6 +29,62 @@ def fit_average_support_line(
     residuals = (samples - center) @ axes[1]
     rms_error = float(np.sqrt(np.mean(np.square(residuals))))
     return tuple(map(float, start)), tuple(map(float, end)), rms_error
+
+
+@dataclass(frozen=True, slots=True)
+class BacklineMetricEstimate:
+    pitch_width_m: float
+    rms_error_px: float
+    maximum_line_deviation_px: float
+
+
+def estimate_pitch_width_from_centered_goal(
+    rear_corner: tuple[float, float],
+    rear_post: tuple[float, float],
+    front_post: tuple[float, float],
+    front_corner: tuple[float, float],
+    *,
+    goal_width_m: float,
+    pitch_width_bounds_m: tuple[float, float],
+) -> BacklineMetricEstimate:
+    """Infer backline width from its projective cross-ratio and a centred goal."""
+    points = np.asarray((rear_corner, rear_post, front_post, front_corner), dtype=np.float64)
+    if points.shape != (4, 2) or not np.all(np.isfinite(points)):
+        raise ValueError("Vier eindige hoek- en paalpunten vereist.")
+    minimum_width, maximum_width = pitch_width_bounds_m
+    if not 0.0 < goal_width_m < minimum_width <= maximum_width:
+        raise ValueError("Ongeldige doelbreedte of veldbreedtegrenzen.")
+    center = points.mean(axis=0)
+    _, _, axes = np.linalg.svd(points - center, full_matrices=False)
+    direction = axes[0]
+    pixels = (points - center) @ direction
+    if pixels[-1] < pixels[0]:
+        pixels = -pixels
+    if not np.all(np.diff(pixels) > 1e-6):
+        raise ValueError("Hoeken en doelpalen staan niet in de verwachte volgorde.")
+    perpendicular = (points - center) @ axes[1]
+
+    def fit(width_m: float) -> tuple[float, np.ndarray]:
+        rear_post_m = (width_m - goal_width_m) / 2.0
+        metres = np.asarray((0.0, rear_post_m, rear_post_m + goal_width_m, width_m))
+        matrix = np.column_stack((metres, np.ones(4), -pixels * metres))
+        parameters = np.linalg.lstsq(matrix, pixels, rcond=None)[0]
+        predicted = (parameters[0] * metres + parameters[1]) / (parameters[2] * metres + 1.0)
+        residuals = predicted - pixels
+        return float(np.sqrt(np.mean(np.square(residuals)))), residuals
+
+    optimum = minimize_scalar(
+        lambda width: fit(float(width))[0],
+        bounds=(minimum_width, maximum_width),
+        method="bounded",
+        options={"xatol": 1e-7},
+    )
+    rms, _residuals = fit(float(optimum.x))
+    return BacklineMetricEstimate(
+        float(optimum.x),
+        rms,
+        float(np.max(np.abs(perpendicular))),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,11 +191,13 @@ class GoalSeedApp:
         video_path: Path,
         bootstrap_path: Path,
         goal_width_m: float = 5.0,
+        pitch_width_m: float = 42.5,
         match_format: str = "8v8",
         fallback_goal_times: tuple[float, float] | None = None,
     ) -> None:
         self.video_path = video_path
         self.goal_width_m = goal_width_m
+        self.pitch_width_m = pitch_width_m
         self.match_format = match_format
         if bootstrap_path.exists():
             report = json.loads(bootstrap_path.read_text(encoding="utf-8"))
@@ -556,7 +615,7 @@ class GoalSeedApp:
                     seed.first_ground,
                     seed.second_ground,
                     seed.goal_width_m,
-                    42.5,
+                    self.pitch_width_m,
                     seed.rear_corner,
                     seed.front_corner,
                 )

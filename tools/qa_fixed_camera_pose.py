@@ -89,9 +89,21 @@ def main() -> None:
     right_axes = list(right_refinement.line_axis_assignment)
 
     frame_size = _frame_size(video_path)
+    regulatory_pitch_dimension_bounds = (
+        (profile.minimum_pitch_length_m, profile.maximum_pitch_length_m),
+        (profile.minimum_pitch_width_m, profile.maximum_pitch_width_m),
+    )
+    pitch_dimension_bounds = profile.soft_pitch_dimension_bounds
+    estimate_dimensions = not profile.dimensions_are_exact
     if args.points_only:
         active_constraints = ()
-        result = estimate_fixed_camera_poses(reference, tuple(views), frame_size)
+        result = estimate_fixed_camera_poses(
+            reference,
+            tuple(views),
+            frame_size,
+            pitch_dimension_bounds=pitch_dimension_bounds if estimate_dimensions else None,
+            pitch_dimension_prior_weight=4.0 if estimate_dimensions else 0.0,
+        )
         selected_axis_swaps = None
     else:
         candidates = []
@@ -115,7 +127,12 @@ def main() -> None:
                     for line, axis in zip(manual_views[1].lines, right_axes)
                 )
                 estimate = estimate_fixed_camera_poses(
-                    reference, tuple(views), frame_size, constraints
+                    reference,
+                    tuple(views),
+                    frame_size,
+                    constraints,
+                    pitch_dimension_bounds=pitch_dimension_bounds if estimate_dimensions else None,
+                    pitch_dimension_prior_weight=4.0 if estimate_dimensions else 0.0,
                 )
                 candidates.append((estimate.rms_error_px, swap_left, swap_right, constraints, estimate))
         _score, swap_left, swap_right, active_constraints, result = min(
@@ -126,6 +143,16 @@ def main() -> None:
         "schema_version": 1,
         "video_name": video_path.name,
         "match_format": args.format,
+        "pitch_dimensions": {
+            "estimated_length_m": result.pitch_length_m,
+            "estimated_width_m": result.pitch_width_m,
+            "allowed_length_m": list(pitch_dimension_bounds[0]),
+            "allowed_width_m": list(pitch_dimension_bounds[1]),
+            "knvb_length_m": list(regulatory_pitch_dimension_bounds[0]),
+            "knvb_width_m": list(regulatory_pitch_dimension_bounds[1]),
+            "informal_layout_tolerance_m": profile.boundary_layout_tolerance_m,
+            "exact": profile.dimensions_are_exact,
+        },
         "camera_center_m": result.camera_center.tolist(),
         "rms_error_px": result.rms_error_px,
         "maximum_error_px": result.maximum_error_px,
@@ -151,7 +178,7 @@ def main() -> None:
     }
     report_path = output_dir / f"{prefix}_fixed_camera_pose_qa.json"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    preview = _preview(video_path, result.views, profile.pitch_length_m, profile.pitch_width_m)
+    preview = _preview(video_path, result.views, result.pitch_length_m, result.pitch_width_m)
     preview_path = output_dir / f"{prefix}_fixed_camera_pose_qa.jpg"
     cv2.imwrite(str(preview_path), preview)
     status = "GELDIG" if report["physically_valid"] else "AFGEKEURD"
@@ -159,6 +186,11 @@ def main() -> None:
         f"Vaste camera: {status} | positie "
         f"({result.camera_center[0]:.2f}, {result.camera_center[1]:.2f}, {result.camera_center[2]:.2f})m | "
         f"RMS {result.rms_error_px:.2f}px | max {result.maximum_error_px:.2f}px"
+    )
+    print(
+        f"Veldmaat: {result.pitch_length_m:.2f} x {result.pitch_width_m:.2f}m | "
+        f"praktische zoekruimte {pitch_dimension_bounds[0][0]:g}-{pitch_dimension_bounds[0][1]:g} x "
+        f"{pitch_dimension_bounds[1][0]:g}-{pitch_dimension_bounds[1][1]:g}m"
     )
     for item in result.views:
         print(

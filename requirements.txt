@@ -1,6 +1,6 @@
 numpy
 opencv-python
-rfdetr
+rfdetr[train]
 supervision
 torch
 torchvision

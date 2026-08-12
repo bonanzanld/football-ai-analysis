@@ -32,6 +32,15 @@ class PlayableFieldContourTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_playable_field_contour(create_detection_profile("8v8"), self._bindings(False))
 
+    def test_projected_boundaries_share_closed_corner_endpoints(self) -> None:
+        contour = create_playable_field_contour(create_detection_profile("8v8"), self._bindings())
+        boundaries = contour.projected_boundaries(np.eye(3))
+
+        self.assertEqual(len(boundaries), 4)
+        for index, (_start, end) in enumerate(boundaries):
+            next_start, _next_end = boundaries[(index + 1) % 4]
+            self.assertIs(end, next_start)
+
     def test_rejects_crossed_corner_order(self) -> None:
         quality = validate_playable_contour_geometry(
             np.asarray(((0, 0), (64, 42.5), (64, 0), (0, 42.5))),

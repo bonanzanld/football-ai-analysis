@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from football_ai.calibration.manual_midfield_line import (
     ManualMidfieldLine,
+    load_manual_midfield_line,
     save_manual_midfield_line,
 )
 from football_ai.calibration.manual_perspective_reference import load_manual_perspective_reference
@@ -25,7 +26,12 @@ class MidfieldLineCollector:
     PANEL_WIDTH = 500
     POINT_COUNT = 7
 
-    def __init__(self, video: Path, initial_time_seconds: float) -> None:
+    def __init__(
+        self,
+        video: Path,
+        initial_time_seconds: float,
+        existing: ManualMidfieldLine | None = None,
+    ) -> None:
         self.video = video
         self.capture = cv2.VideoCapture(str(video))
         if not self.capture.isOpened():
@@ -38,11 +44,26 @@ class MidfieldLineCollector:
         self.reference_frame_number: int | None = None
         self.reference_time_seconds: float | None = None
         self.front_frame_number: int | None = None
+        self.front_not_visible = False
         self.zoom = 1.0
         self.center: tuple[float, float] | None = None
         self.mapping = (0.0, 0.0, 1.0, 0.0, 0.0)
         self.status = "Zoek een beeld waarop de witte 11v11-middenlijn goed zichtbaar is."
         self.saved: ManualMidfieldLine | None = None
+        if existing is not None:
+            if existing.front_sideline_point is not None:
+                raise ValueError("De bestaande middenlijn heeft al een voorste zijlijnpositie.")
+            if existing.rear_sideline_point is None:
+                raise ValueError("De bestaande middenlijn mist de achterste zijlijnpositie.")
+            self.points = [*existing.points, existing.rear_sideline_point]
+            self.reference_frame_number = existing.frame_number
+            self.reference_time_seconds = existing.time_seconds
+            self.front_frame_number = None
+            self.status = (
+                "Bestaande richting en ACHTER geladen. Zoek met , en . een beeld met een "
+                "betrouwbaar hoedje of punt OP de VOORSTE 8v8-zijlijn. Deze lijn loopt parallel "
+                "aan de witte 11v11-middenlijn; zoek dus GEEN kruispunt."
+            )
 
     def run(self) -> ManualMidfieldLine:
         cv2.namedWindow(self.WINDOW, cv2.WINDOW_NORMAL)
@@ -61,6 +82,7 @@ class MidfieldLineCollector:
                     self.reference_frame_number = None
                     self.reference_time_seconds = None
                     self.front_frame_number = None
+                    self.front_not_visible = False
                     self.status = "Alles gewist. Begin opnieuw met vijf punten op de witte referentielijn."
                 elif key in (ord("+"), ord("=")):
                     self._zoom(1.25)
@@ -80,6 +102,10 @@ class MidfieldLineCollector:
                     self._shift_time(-1.0)
                 elif key in (ord("."), ord(">")):
                     self._shift_time(1.0)
+                elif key in (ord("n"), ord("N")) and len(self.points) == 6:
+                    self.front_not_visible = True
+                    self.front_frame_number = None
+                    self.status = "VOOR niet zichtbaar. Druk Enter om zonder voorste zijlijn op te slaan."
                 elif key in (10, 13):
                     self._finish()
         finally:
@@ -101,7 +127,7 @@ class MidfieldLineCollector:
         if self.points and len(self.points) < 6:
             self.status = "Leg eerst richting en ACHTER vast voordat je van videomoment wisselt."
             return
-        if len(self.points) >= 7:
+        if len(self.points) >= 7 or self.front_not_visible:
             self.status = "VOOR is al opgeslagen. Gebruik U of R om dit te wijzigen."
             return
         duration = max((self.frame_count - 1) / self.fps, 0.0)
@@ -150,7 +176,11 @@ class MidfieldLineCollector:
                 self.center = (x0 + (x - ox) / scale, y0 + (y - oy) / scale)
             self._zoom(1.25 if flags > 0 else 0.8)
             return
-        if event != cv2.EVENT_LBUTTONDOWN or len(self.points) >= self.POINT_COUNT:
+        if (
+            event != cv2.EVENT_LBUTTONDOWN
+            or len(self.points) >= self.POINT_COUNT
+            or self.front_not_visible
+        ):
             return
         x0, y0, scale, ox, oy = self.mapping
         point = (x0 + (x - ox) / scale, y0 + (y - oy) / scale)
@@ -181,6 +211,7 @@ class MidfieldLineCollector:
         if self.points:
             if len(self.points) == 7:
                 self.front_frame_number = None
+            self.front_not_visible = False
             self.points.pop()
             self.status = "Laatste punt verwijderd."
         else:
@@ -201,7 +232,9 @@ class MidfieldLineCollector:
         )
 
     def _finish(self) -> None:
-        if len(self.points) != self.POINT_COUNT:
+        if len(self.points) != self.POINT_COUNT and not (
+            len(self.points) == 6 and self.front_not_visible
+        ):
             self.status = f"Nog {self.POINT_COUNT - len(self.points)} klik(ken) nodig voordat Enter werkt."
             return
         observation = self._observation()
@@ -270,8 +303,12 @@ class MidfieldLineCollector:
             "STAP 3 - KLIK 1 PUNT VOOR",
             "Op de 8v8-zijlijn het dichtst bij de camera.",
             "Een hoedje of zichtbaar lijnpunt is voldoende.",
+            "De 8v8-zijlijn loopt PARALLEL aan de",
+            "witte 11v11-middenlijn: GEEN kruispunt.",
             "NIET ZICHTBAAR? Gebruik , en . om",
             "naar een ander videomoment te bladeren.",
+            "Ook nergens zichtbaar? Druk N om deze",
+            "observatie eerlijk leeg te laten.",
             "De eerdere klikken blijven bewaard.",
             "",
             f"Videomoment: {self.time_seconds:.1f}s",
@@ -280,7 +317,7 @@ class MidfieldLineCollector:
             "Muiswiel of +/-: zoomen",
             "Pijltjes of W/A/S/D: beeld bewegen",
             ", en . : 1 seconde eerder/later",
-            "0: volledig beeld | U: laatste punt",
+            "0: volledig beeld | U: laatste punt | N: niet zichtbaar",
             "R: alle punten wissen",
             "Enter: opslaan | Esc: afbreken",
             "",
@@ -332,15 +369,22 @@ def main() -> None:
     parser.add_argument("--video", required=True)
     parser.add_argument("--format", choices=("6v6", "8v8", "11v11"), default="8v8")
     parser.add_argument("--time", type=float, help="Optioneel startmoment in seconden.")
+    parser.add_argument(
+        "--resume-front",
+        action="store_true",
+        help="Behoud de vijf lijnpunten en ACHTER; vraag alleen het ontbrekende VOOR-punt.",
+    )
     args = parser.parse_args()
 
     video = PROJECT_ROOT / "videos" / args.video
     output_dir = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
     perspective_path = output_dir / f"{prefix}_manual_perspective_reference.json"
-    observation = MidfieldLineCollector(video, _initial_time(perspective_path, args.time)).run()
-
     output = output_dir / f"{prefix}_manual_midfield_line.json"
+    existing = load_manual_midfield_line(output) if args.resume_front else None
+    initial_time = existing.time_seconds if existing is not None else _initial_time(perspective_path, args.time)
+    observation = MidfieldLineCollector(video, initial_time, existing=existing).run()
+
     save_manual_midfield_line(observation, output)
     capture = cv2.VideoCapture(str(video))
     capture.set(cv2.CAP_PROP_POS_FRAMES, observation.frame_number)

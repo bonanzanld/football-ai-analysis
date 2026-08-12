@@ -49,6 +49,13 @@ class PlayableFieldContour:
         projected = (np.asarray(ground_to_image, dtype=np.float64) @ homogeneous.T).T
         return projected[:, :2] / projected[:, 2:3]
 
+    def projected_boundaries(
+        self, ground_to_image: np.ndarray
+    ) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+        """Return one closed ring: adjacent boundaries reuse exact corner arrays."""
+        corners = tuple(self.project(ground_to_image))
+        return tuple((corners[index], corners[(index + 1) % 4]) for index in range(4))
+
     def to_dict(self) -> dict:
         return {
             "match_format": self.match_format,

@@ -7,6 +7,7 @@ from football_ai.detection.ball_tracking import (
     BallCandidate,
     BallObservation,
     BallTracker,
+    PlayerContext,
     best_local_search_anchor,
     exclude_candidates_inside_people,
     hold_stationary_detected_gaps,
@@ -17,6 +18,19 @@ from football_ai.detection.ball_tracking import (
 
 
 class BallTrackerTests(unittest.TestCase):
+    def test_records_owner_identity_from_player_context(self) -> None:
+        tracker = BallTracker(acquisition_confidence=0.50)
+        owner = PlayerContext(7, 0, (100.0, 105.0), (80.0, 60.0, 120.0, 105.0))
+        tracker.update(
+            0,
+            [BallCandidate((95, 95, 105, 105), 0.80)],
+            player_footpoints=(owner.footpoint,),
+            player_contexts=(owner,),
+        )
+
+        self.assertEqual(tracker.last_owner_track_id, 7)
+        self.assertEqual(tracker.last_owner_team_id, 0)
+
     def test_offsets_local_candidate_to_full_frame(self) -> None:
         candidate = offset_ball_candidate(
             BallCandidate((10, 20, 30, 40), 0.75),
@@ -1375,20 +1389,20 @@ class BallTrackerTests(unittest.TestCase):
         centers = [item.center[0] for item in predictions if item is not None]
         self.assertEqual(centers, [125.0, 135.0, 145.0, 155.0, 165.0])
 
-    def test_rejects_candidate_inside_person_lower_body(self) -> None:
+    def test_keeps_candidate_inside_person_lower_body(self) -> None:
         candidate = BallCandidate((45, 75, 55, 85), 0.80)
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
-    def test_rejects_weak_candidate_on_person_head(self) -> None:
+    def test_keeps_weak_candidate_on_person_head_for_later_selection(self) -> None:
         candidate = BallCandidate((45, 22, 55, 32), 0.07)
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
-    def test_rejects_weak_candidate_on_person_torso(self) -> None:
+    def test_keeps_weak_candidate_on_person_torso_for_ball_control(self) -> None:
         candidate = BallCandidate((45, 42, 55, 52), 0.07)
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
     def test_keeps_weak_ball_sized_candidate_in_crowded_foot_zone(self) -> None:
         candidate = BallCandidate((55, 82, 69, 96), 0.08)
@@ -1400,7 +1414,7 @@ class BallTrackerTests(unittest.TestCase):
 
         self.assertEqual(result, [candidate])
 
-    def test_rejects_weak_head_candidate_even_in_crowded_play(self) -> None:
+    def test_keeps_weak_head_candidate_in_crowded_play_for_later_selection(self) -> None:
         candidate = BallCandidate((55, 28, 69, 42), 0.08)
 
         result = exclude_candidates_inside_people(
@@ -1408,7 +1422,7 @@ class BallTrackerTests(unittest.TestCase):
             [(20, 20, 62, 100), (64, 20, 106, 100)],
         )
 
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
     def test_keeps_candidate_beside_person_box(self) -> None:
         candidate = BallCandidate((85, 75, 95, 85), 0.80)
@@ -1420,10 +1434,10 @@ class BallTrackerTests(unittest.TestCase):
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
         self.assertEqual(result, [candidate])
 
-    def test_rejects_shoe_candidate_inside_bottom_of_person_box(self) -> None:
+    def test_keeps_shoe_sized_candidate_as_unfiltered_detector_evidence(self) -> None:
         candidate = BallCandidate((45, 90, 55, 99), 0.80)
         result = exclude_candidates_inside_people([candidate], [(20, 20, 80, 100)])
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
     def test_keeps_large_strong_ball_overlapping_person_feet(self) -> None:
         candidate = BallCandidate((40, 78, 60, 98), 0.74)
@@ -1455,7 +1469,7 @@ class BallTrackerTests(unittest.TestCase):
 
         self.assertEqual(result, [candidate])
 
-    def test_rejects_large_candidate_fully_inside_lower_body(self) -> None:
+    def test_keeps_large_candidate_fully_inside_lower_body(self) -> None:
         candidate = BallCandidate((40, 60, 60, 80), 0.80)
 
         result = exclude_candidates_inside_people(
@@ -1463,7 +1477,7 @@ class BallTrackerTests(unittest.TestCase):
             [(20, 20, 80, 100)],
         )
 
-        self.assertEqual(result, [])
+        self.assertEqual(result, [candidate])
 
     def test_keeps_ball_touching_outside_of_person_box(self) -> None:
         candidate = BallCandidate((75, 92, 89, 106), 0.80)

@@ -129,6 +129,50 @@ def load_video_projection_plan(path: Path) -> VideoProjectionPlan:
     return VideoProjectionPlan.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
+def gate_projection_plan_with_player_evidence(
+    plan: VideoProjectionPlan,
+    classifications_by_frame: dict[int, str],
+) -> VideoProjectionPlan:
+    """Reject resolved field geometry contradicted by player footpoints.
+
+    Player evidence is deliberately one-way: it may veto geometry, but it may
+    never create a projection or promote a candidate to valid.
+    """
+    allowed = {"unavailable", "insufficient_evidence", "ambiguous", "supportive", "rejected"}
+    unknown = set(classifications_by_frame.values()) - allowed
+    if unknown:
+        raise ValueError(f"Onbekende spelersclassificaties: {sorted(unknown)}")
+    records = []
+    for item in plan.records:
+        classification = classifications_by_frame.get(item.frame_number)
+        if classification == "rejected" and item.projection_matrix is not None:
+            records.append(
+                PlannedProjection(
+                    item.time_seconds,
+                    item.frame_number,
+                    "unknown",
+                    None,
+                    None,
+                    f"Spelervoetpunten verwerpen veldprojectie. Eerder: {item.reason}",
+                    item.inliers,
+                    item.inlier_ratio,
+                    item.coverage,
+                    item.supporting_line_count,
+                    item.supporting_line_length_m,
+                )
+            )
+        else:
+            records.append(item)
+    return VideoProjectionPlan(
+        plan.video,
+        plan.match_format,
+        plan.start_seconds,
+        plan.duration_seconds,
+        plan.interval_seconds,
+        tuple(records),
+    )
+
+
 class OfflineVideoProjectionAnalyzer:
     """Resolve an entire video section before any QA frames are rendered."""
 

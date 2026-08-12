@@ -46,6 +46,7 @@ def main() -> None:
             video,
             bootstrap,
             goal_width_m=profile.goal_width_m,
+            pitch_width_m=profile.pitch_width_m,
             match_format=profile.match_format.value,
             fallback_goal_times=_manual_goal_times(
                 PROJECT_ROOT / "output" / "pitch_bootstrap" / f"{stem}_{args.format}_manual_perspective_reference.json"

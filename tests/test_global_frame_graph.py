@@ -3,9 +3,12 @@ import unittest
 import numpy as np
 
 from football_ai.calibration.global_frame_graph import (
+    AbsoluteGroundLineConstraint,
     FrameGraphEdge,
     FrameGraphNode,
     GroundDirectionConstraint,
+    connected_frame_graph_components,
+    homography_local_scale_ratio,
     select_maximum_quality_tree,
     solve_global_frame_graph,
 )
@@ -28,10 +31,23 @@ class GlobalFrameGraphTests(unittest.TestCase):
         mapped /= mapped[2]
         self.assertAlmostEqual(mapped[0], -20.0, delta=0.3)
 
+    def test_measures_local_homography_scale(self) -> None:
+        self.assertAlmostEqual(homography_local_scale_ratio(np.eye(3)), 1.0)
+        zoom = np.asarray(((1.25, 0.0, -160.0), (0.0, 1.25, -90.0), (0.0, 0.0, 1.0)))
+        self.assertAlmostEqual(homography_local_scale_ratio(zoom), 1.25)
+
     def test_reports_disconnected_nodes(self) -> None:
         nodes = (FrameGraphNode("a", 1, 0.0), FrameGraphNode("b", 2, 1.0), FrameGraphNode("c", 3, 2.0))
         result = solve_global_frame_graph(nodes, (self._edge("a", "b", 5.0),), "a")
         self.assertEqual(result.rejected_nodes, ("c",))
+
+    def test_lists_components_after_zoom_edges_are_removed(self) -> None:
+        nodes = tuple(FrameGraphNode(item, index, float(index)) for index, item in enumerate("abcd"))
+        components = connected_frame_graph_components(
+            nodes,
+            (self._edge("a", "b", 1.0), self._edge("c", "d", 1.0)),
+        )
+        self.assertEqual(components, (("a", "b"), ("c", "d")))
 
     def test_quality_tree_keeps_all_nodes_without_cycle(self) -> None:
         nodes = tuple(FrameGraphNode(str(i), i, float(i)) for i in range(4))
@@ -70,6 +86,32 @@ class GlobalFrameGraphTests(unittest.TestCase):
         vanishing = np.linalg.inv(result.node_to_reference["b"]) @ ground_to_reference[:, 0]
         vanishing /= vanishing[2]
         self.assertLess(abs(float(vanishing[1]) - 100.0), 50.0)
+
+    def test_absolute_ground_line_pins_metric_line_to_observation(self) -> None:
+        nodes = (FrameGraphNode("a", 1, 0.0), FrameGraphNode("b", 2, 1.0))
+        constraint = AbsoluteGroundLineConstraint(
+            "b",
+            np.asarray(((0.0, 10.0), (64.0, 10.0))),
+            np.asarray((0.0, 1.0, -200.0)),
+            10000.0,
+        )
+        result = solve_global_frame_graph(
+            nodes,
+            (self._edge("a", "b", 0.0),),
+            "a",
+            _pruning_rounds=0,
+            reference_ground_to_image=np.asarray(
+                ((10.0, 0.0, 0.0), (0.0, 10.0, 0.0), (0.0, 0.0, 1.0))
+            ),
+            absolute_ground_line_constraints=(constraint,),
+        )
+        projected = result.node_to_reference["b"]
+        ground_to_b = np.linalg.inv(projected) @ np.asarray(
+            ((10.0, 0.0, 0.0), (0.0, 10.0, 0.0), (0.0, 0.0, 1.0))
+        )
+        point = ground_to_b @ np.asarray((32.0, 10.0, 1.0))
+        point /= point[2]
+        self.assertAlmostEqual(point[1], 200.0, delta=5.0)
 
 
 if __name__ == "__main__":

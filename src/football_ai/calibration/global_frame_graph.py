@@ -97,6 +97,97 @@ class AbsoluteGroundPointConstraint:
         object.__setattr__(self, "image_points", image)
 
 
+@dataclass(frozen=True, slots=True)
+class AbsoluteGroundLineConstraint:
+    """Pins known metric ground points to one observed image line."""
+
+    node_id: str
+    ground_points: np.ndarray
+    image_line: np.ndarray
+    weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        ground = np.asarray(self.ground_points, dtype=np.float64)
+        line = np.asarray(self.image_line, dtype=np.float64)
+        if ground.ndim != 2 or ground.shape[1] != 2 or len(ground) < 2:
+            raise ValueError("Absolute grondlijn vereist minstens twee metrische punten.")
+        if line.shape != (3,) or not np.all(np.isfinite(ground)) or not np.all(np.isfinite(line)):
+            raise ValueError("Absolute grondlijn bevat ongeldige waarden.")
+        normal = float(np.linalg.norm(line[:2]))
+        if normal < 1e-9:
+            raise ValueError("Absolute beeldlijn is degeneraat.")
+        object.__setattr__(self, "ground_points", ground)
+        object.__setattr__(self, "image_line", line / normal)
+
+
+def homography_local_scale_ratio(
+    matrix: np.ndarray,
+    point: tuple[float, float] = (640.0, 360.0),
+) -> float:
+    """Return isotropic area-scale proxy of a homography near one image point."""
+
+    homography = np.asarray(matrix, dtype=np.float64)
+    if homography.shape != (3, 3) or not np.all(np.isfinite(homography)):
+        raise ValueError("Scale ratio requires a finite 3x3 homography")
+    x, y = (float(value) for value in point)
+    a, b, c = homography[0]
+    d, e, f = homography[1]
+    g, h, i = homography[2]
+    denominator = g * x + h * y + i
+    if abs(float(denominator)) < 1e-12:
+        raise ValueError("Homography maps scale sample to infinity")
+    numerator_x = a * x + b * y + c
+    numerator_y = d * x + e * y + f
+    jacobian = np.asarray(
+        (
+            (
+                (a * denominator - g * numerator_x) / denominator**2,
+                (b * denominator - h * numerator_x) / denominator**2,
+            ),
+            (
+                (d * denominator - g * numerator_y) / denominator**2,
+                (e * denominator - h * numerator_y) / denominator**2,
+            ),
+        ),
+        dtype=np.float64,
+    )
+    determinant = abs(float(np.linalg.det(jacobian)))
+    if not np.isfinite(determinant) or determinant < 1e-12:
+        raise ValueError("Homography has degenerate local scale")
+    return float(np.sqrt(determinant))
+
+
+def connected_frame_graph_components(
+    nodes: tuple[FrameGraphNode, ...],
+    edges: tuple[FrameGraphEdge, ...],
+) -> tuple[tuple[str, ...], ...]:
+    """Return deterministic connected node groups after edge filtering."""
+
+    adjacency = {node.node_id: set() for node in nodes}
+    for edge in edges:
+        if edge.source_id not in adjacency or edge.target_id not in adjacency:
+            raise ValueError("Framegraph edge references an unknown node")
+        adjacency[edge.source_id].add(edge.target_id)
+        adjacency[edge.target_id].add(edge.source_id)
+    remaining = set(adjacency)
+    components = []
+    while remaining:
+        start = min(remaining)
+        component = {start}
+        queue = [start]
+        while queue:
+            current = queue.pop(0)
+            for neighbour in sorted(adjacency[current]):
+                if neighbour in component:
+                    continue
+                component.add(neighbour)
+                queue.append(neighbour)
+        remaining -= component
+        components.append(tuple(sorted(component)))
+    components.sort(key=lambda item: (-len(item), item))
+    return tuple(components)
+
+
 def select_maximum_quality_tree(
     nodes: tuple[FrameGraphNode, ...],
     edges: tuple[FrameGraphEdge, ...],
@@ -260,6 +351,7 @@ def solve_global_frame_graph(
     reference_ground_to_image: np.ndarray | None = None,
     absolute_ground_constraints: tuple[AbsoluteGroundConstraint, ...] = (),
     absolute_ground_point_constraints: tuple[AbsoluteGroundPointConstraint, ...] = (),
+    absolute_ground_line_constraints: tuple[AbsoluteGroundLineConstraint, ...] = (),
 ) -> GlobalFrameGraphSolution:
     node_ids = {item.node_id for item in nodes}
     if reference_id not in node_ids:
@@ -308,7 +400,10 @@ def solve_global_frame_graph(
     active_points = tuple(
         item for item in absolute_ground_point_constraints if item.node_id in transforms
     )
-    if (active_constraints or active_absolute or active_points) and reference_ground_to_image is None:
+    active_lines = tuple(
+        item for item in absolute_ground_line_constraints if item.node_id in transforms
+    )
+    if (active_constraints or active_absolute or active_points or active_lines) and reference_ground_to_image is None:
         raise ValueError("Grondvoorwaarden vereisen de grondhomography van het referentieframe.")
     reference_h = None
     if reference_ground_to_image is not None:
@@ -364,6 +459,16 @@ def solve_global_frame_graph(
                 (predicted - constraint.image_points).reshape(-1)
                 * np.sqrt(max(constraint.weight, 0.05))
             )
+        for constraint in active_lines:
+            predicted = _project(
+                constraint.ground_points,
+                np.linalg.inv(current[constraint.node_id]) @ reference_h,
+            )
+            homogeneous = np.column_stack((predicted, np.ones(len(predicted))))
+            parts.append(
+                (homogeneous @ constraint.image_line)
+                * np.sqrt(max(constraint.weight, 0.05))
+            )
         return np.concatenate(parts) if parts else np.empty(0)
 
     if len(initial) and connected_edges:
@@ -371,8 +476,9 @@ def solve_global_frame_graph(
         edge_rows = len(connected_edges) * residuals_per_edge
         absolute_rows = len(active_absolute) * 10
         point_rows = sum(len(item.ground_points) * 2 for item in active_points)
+        line_rows = sum(len(item.ground_points) for item in active_lines)
         sparsity = lil_matrix(
-            (edge_rows + len(active_constraints) + absolute_rows + point_rows, len(initial)),
+            (edge_rows + len(active_constraints) + absolute_rows + point_rows + line_rows, len(initial)),
             dtype=np.int8,
         )
         for edge_index, edge in enumerate(connected_edges):
@@ -402,6 +508,13 @@ def solve_global_frame_graph(
                 column_start = index[constraint.node_id] * 8
                 sparsity[point_start:point_start + rows, column_start:column_start + 8] = 1
             point_start += rows
+        line_start = absolute_start + absolute_rows + point_rows
+        for constraint in active_lines:
+            rows = len(constraint.ground_points)
+            if constraint.node_id != reference_id:
+                column_start = index[constraint.node_id] * 8
+                sparsity[line_start:line_start + rows, column_start:column_start + 8] = 1
+            line_start += rows
         optimum = least_squares(
             residual,
             initial,
@@ -420,7 +533,7 @@ def solve_global_frame_graph(
             if error <= 8.0
         )
         if len(retained) < len(connected_edges) and retained:
-            return solve_global_frame_graph(
+            pruned = solve_global_frame_graph(
                 nodes,
                 retained,
                 reference_id,
@@ -429,7 +542,19 @@ def solve_global_frame_graph(
                 reference_ground_to_image,
                 absolute_ground_constraints,
                 absolute_ground_point_constraints,
+                absolute_ground_line_constraints,
             )
+            required_nodes = {
+                item.node_id
+                for item in (
+                    *active_constraints,
+                    *active_absolute,
+                    *active_points,
+                    *active_lines,
+                )
+            }
+            if required_nodes <= set(pruned.connected_nodes):
+                return pruned
     errors = np.asarray(edge_errors if edge_errors else (0.0,), dtype=np.float64)
     return GlobalFrameGraphSolution(
         reference_id,

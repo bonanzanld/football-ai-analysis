@@ -142,14 +142,48 @@ Open the local review interface:
   --annotations data/ball_ground_truth/brandevoortBRAB_vid2/annotations.json
 ```
 
+To tighten existing detector-visible boxes without stepping through occluded or
+not-visible frames, use the dedicated recheck queue:
+
+```bash
+.venv/bin/python tools/review_ball_ground_truth.py \
+  --annotations data/ball_ground_truth/ClipTrainingBallFar_dense_900_960/annotations.json \
+  --recheck-visible
+```
+
+This mode contains only existing `human_reviewed` + `visible` annotations with
+a box. Saving advances to the next item in that fixed queue; it does not change
+labels outside the queue.
+
 Click the center of the active ball to place a 20-pixel box; `+` and `-` resize
-it. Mouse dragging remains available when a custom box is easier. Use the
+the current box in two-pixel steps. Mouse dragging remains available when a
+custom box is easier. The magnified preview stays centered on the current box
+and draws that same box over the enlarged pixels, including its exact width and
+height in the sidebar. Use the
 on-screen buttons to save the ball as visible, player-occluded, or not visible;
 the next frame opens automatically. Keyboard shortcuts remain available, but
 are not required. The cursor magnifier helps with small distant balls. Every
 confirmation is saved immediately; `A` and `D` navigate between frames. Only
 entries explicitly saved by this interface as `human_reviewed` participate in
 the metrics.
+
+Annotate the complete visible ball appearance, not an idealized circle. A ball
+can deform at impact and motion blur or frame exposure can make it elongated.
+In those frames, drag a tight rectangular box around the full visible/deformed
+or blurred footprint; do not force it back to a square. Detector proposals and
+later candidate filters must likewise treat aspect ratio as soft evidence, not
+as a hard roundness requirement.
+When a partial manifest is reopened, the reviewer resumes at the first
+unreviewed frame. After confirmation it skips already reviewed frames and
+continues with the next open item; `A` and `D` still provide sequential
+navigation for deliberate rechecks.
+Candidate prefill is deliberately limited to detections with at least 0.75
+confidence. On the reviewed `brandevoortBRAB_vid2` frames, simply choosing the
+highest-scoring low-confidence candidate selected the active ball on only 3
+of 26 unique reviewed ball frames. The reviewed `brandevoortbrab_clip3` proposals
+all exceeded the cutoff and matched the active ball in 13/13 dense frames.
+Weak candidates therefore remain visible to the analysis pipeline but are not
+presented as trustworthy green review shortcuts.
 
 Collect raw and person-filtered detector candidates on only the annotated
 frames, then evaluate both stages:
@@ -197,22 +231,198 @@ that lowering the threshold recovers real ball signal but cannot be used as a
 standalone selection rule.
 
 The original whole-person overlap filter retained 158 candidates but removed
-all nine matching ball candidates, reducing recall to 0%. The filter is now
-body-region-aware: compact weak candidates in the leg zone can reach the
-temporal tracker, while head, torso, tiny shoe-texture, and oversized clothing
-hits remain excluded. On the same reviewed frames it retains 336 candidates
-and matches 8/10 visible or occluded balls: 80.0% recall and 2.38% precision.
-The remaining errors are localization misses on frames 485 and 490. Frame 485
-has no raw detector candidate within the agreed 20-pixel center tolerance;
-frame 490 has a nearby raw candidate higher in the player box, but preserving
-it would weaken the torso/shoe guard without enough evidence that it is the
-ball. This small problem-window baseline therefore does not justify opening
-the body filter further.
+all nine matching ball candidates, reducing recall to 0%. A later
+body-region-aware version still made an irreversible decision before temporal
+or active-ball selection. Dense review of a goalkeeper holding the ball showed
+the same failure mode outside the leg zone: person filtering reduced raw
+detector recall from 23.7% to 10.2%. Detector candidates now remain available
+even when they overlap a person box. This applies to goalkeepers and field
+players because control, tackles, headers, and throw-ins can all put the real
+ball inside a person box. Body overlap is context for later selection, not
+proof that a candidate is false.
+
+This change deliberately increases clutter. On the reviewed goalkeeper window
+raw candidate precision is only 1.4%, so preserving evidence is not the same as
+selecting the active ball. Fresh candidates are required after this policy
+change; older person-filtered caches are invalid for comparison.
 
 The physical tracker detections also score 0/10 on this five-frame sampling.
 Predicted observations are deliberately excluded, so this result measures
 direct anchors rather than trajectory coverage. These figures apply only to
 the reviewed problem window and are not yet whole-clip performance claims.
+
+### Goalkeeper possession baseline
+
+`ClipTrainingBallFar` frames 900-960 contain 61 human-reviewed goalkeeper
+possession frames: 45 visible, 14 occluded, and two not visible. With person
+overlap filtering removed, raw RF-DETR candidates match 14/59 visible or
+occluded annotations. All 14 matches occur on frames 947-960; 32 reviewed ball
+frames have no matching detector candidate. The current tracker follows a
+different visual object through this window and scores precision, recall, and
+F1 of 0.0 against the dense annotations.
+
+Adding this clip as a fourth source does not rescue the patch classifier. Its
+leave-one-video-out F1 is 0.0 on both the goalkeeper clip and
+`brandevoortBRAB_vid2`; mean F1 falls to 0.184. Keep the classifier out of
+`BallTracker`. The next improvement must address far/held-ball detector recall
+and then prove active-ball selection on clip-separated human review. A
+goalkeeper possession magnet may provide bounded inferred possession, but may
+not invent a physical ball position when the detector has no evidence.
+
+A CPU follow-up added label-free continuity features: confidence rank,
+nearby-frame displacement, size/confidence change, and midpoint consistency.
+Run it with `train_active_ball_classifier.py --feature-set patch-temporal`.
+Mean leave-one-video-out F1 increased only from 0.184 to 0.210. Both difficult
+holdouts remained at F1 0.0, while `ClipTrainingBallFar` produced 1,154 false
+positives. This is a rejected experiment, not a tracking improvement; do not
+integrate the temporal classifier into `BallTracker`.
+
+### Detector fine-tuning data
+
+`tools/export_ball_detector_dataset.py` exports human-reviewed frames in the
+Roboflow COCO directory format consumed by the installed RF-DETR version. It
+requires one or more explicit `--validation-source` values so neighbouring
+frames from a validation video cannot leak into training. Only human-reviewed
+`visible` boxes become positive detector annotations. Human-reviewed
+`not_visible` frames are exported as negative images. `occluded` and
+`unreviewed` frames are excluded because an inferred occluded box is not proof
+of detector-visible pixels.
+
+The first keeper-holdout export is
+`data/ball_detector_rfdetr_keeper_holdout`: 113 training images from four
+source videos (89 positive, 24 negative) and 47 validation images from
+`ClipTrainingBallFar` (45 positive, two negative). RF-DETR 1.8.3 recognizes the
+directory as a valid dataset. This is enough for a controlled experiment, not
+enough to claim a robust detector: the training set is small and the keeper
+review used fixed 20x20 boxes. The optional RF-DETR training dependencies are
+installed. Use the guarded training entry point below on a CUDA or MPS machine;
+it refuses an accidental full CPU run unless `--allow-cpu` is explicit:
+
+```bash
+.venv/bin/python tools/train_ball_detector.py \
+  --dataset data/ball_detector_rfdetr_keeper_holdout \
+  --output output/ball/rfdetr_keeper_holdout
+```
+
+RF-DETR reinitializes its detection head when changing from the pretrained 90
+classes to the single `sports ball` class. For the small keeper-holdout export,
+the default early-stopping window can therefore end before the new head has had
+enough epochs to learn. Use `--disable-early-stopping` only for the controlled
+full-length comparison; keep the clip-separated validation source unchanged.
+
+The controlled RTX 3090 comparison completed all 50 epochs with early stopping
+disabled. It did not validate the fine-tuning approach. The best regular result
+was already epoch 1: mAP 50:95 0.00119, precision 0.00480, recall 0.28889 and F1
+0.00944; best EMA mAP 50:95 was 0.00135. By epoch 50 all reported validation
+metrics had collapsed to zero. Keep this checkpoint out of the detector and
+tracker. The run artifacts are in
+`output/ball/rfdetr_keeper_holdout_50epochs`; more epochs on this export are not
+a justified next step.
+
+The full-frame export also exposes a scale mismatch: at RF-DETR Medium's 576px
+square input, the fixed keeper boxes become about 3x5.3 pixels, versus a mean
+of roughly 11x19.6 pixels in training. A leakage-safe tiled export is available
+through `export_ball_detector_dataset.py --tile-size 960 --tile-overlap 0.25`.
+It preserves source-video separation and skips any tile that would cut through
+a labelled ball. The first tile export contains 226 training tiles (167
+positive) and 705 keeper-holdout tiles (90 positive); keeper boxes become
+12x12 pixels at model input. Evaluation must still scan every full holdout
+frame with the same tile grid and merge overlaps with NMS. A crop selected from
+the known ground-truth location is not a valid holdout evaluation.
+
+Use `tools/evaluate_ball_detector_checkpoint.py` to compare the pretrained and
+fine-tuned models with identical full-frame COCO metrics. Its optional
+`--tile-size 960 --tile-overlap 0.25` mode performs full-image tiled inference
+and class-agnostic NMS before scoring against the original full-frame truth.
+
+The exact 47-image keeper holdout comparison rejects the original full-frame
+fine-tune: pretrained full-frame RF-DETR reaches mAP 50:95 0.00531 and mAR
+0.0667, while its best fine-tuned checkpoint reaches only 0.00083 and 0.0822.
+Tiling the pretrained detector raises mAR to 0.1467 but lowers mAP to 0.00117.
+
+A ten-epoch RTX 3090 run on the tiled export also fails acceptance. Its best
+regular checkpoint reaches mAP 50:95 0.00262 and mAR 0.2533 on the original 47
+full frames, after tiled scanning and NMS, but emits 66,957 predictions. The
+best EMA checkpoint reaches mAP 0.00164 and mAR 0.4222 while emitting 73,352
+predictions. The one-epoch smoke checkpoint had mAP 0.00209, mAR 0.3978 and
+35,050 predictions. Thus tiling exposes more true balls, but it amplifies
+clutter instead of learning a usable ball detector. None of these checkpoints
+belongs in `BallTracker`; more epochs on the same small, fixed-box dataset are
+not justified.
+
+The 45 keeper holdout boxes were subsequently rechecked by a human with the
+magnified box overlay. All fixed 20x20 boxes were replaced by tight boxes from
+12x12 through 18x18 pixels (26 are 14x14). Re-evaluation against this corrected
+truth makes the rejection stronger. Pretrained full-frame RF-DETR reaches mAP
+50:95 0.00519 and mAR 0.0578. Pretrained tiled inference reaches mAP 0.00168
+and mAR 0.1844. The full-frame fine-tune falls to mAP 0.000011 and mAR 0.0044;
+the one-epoch tiled model reaches 0.00056 and 0.1467; the ten-epoch regular and
+EMA models reach respectively 0.00094/0.0711 and 0.00034/0.0933. The training
+split did not change, so retraining those experiments would be identical and
+is not warranted. Earlier fixed-box metrics above are retained only as a record
+of the experiment and must not be used as the current acceptance baseline.
+
+Two additional independent sources were then human-reviewed: 55 visible balls
+from `ClipPSVAJAX` and 53 from `TrainingClipXBOTGO_High`. The resulting
+six-source tiled training split has 437 positive and 941 negative tiles. A
+one-epoch single-class smoke run improved over the earlier fine-tunes but still
+failed the original-frame keeper holdout (mAP 50:95 0.00357, mAR 0.1578, and
+140,090 predictions at threshold 0.001). At threshold 0.02 it retained 915
+predictions with mAP 0.00334 and mAR 0.0911. A five-epoch follow-up regressed to
+mAP 0.00113 and mAR 0.1111, so later epochs are rejected.
+
+RF-DETR normally reinitialized its 90-class detection head for the one-class
+export. A controlled `--preserve-coco-head` export kept 90 contiguous logit
+slots and aligned `sports ball` with pretrained COCO slot 37; the reinitializing
+warning disappeared during training. This did not rescue the approach. Its
+one-epoch checkpoint scored mAP 0.000016 and mAR 0.0044 on the same original
+keeper frames, and found nothing above threshold 0.02. Preserving the head alone
+is therefore rejected too. A future detector experiment needs a different
+optimization/model strategy, not more RF-DETR epochs on these layouts.
+
+A YOLO26s tiny-object baseline reused the same six-source 960px tiles and the
+same keeper holdout. COCO boxes were converted losslessly to YOLO labels,
+including empty negative labels and non-square boxes. Training used 960px
+input, the pretrained sports-ball classification row, AdamW at learning rate
+0.001, one warmup epoch, mosaic 0.5, and 20% motion/Gaussian blur augmentation.
+The ten-epoch validation peaked at epoch 3 and then regressed. On the 47
+original keeper frames, tiled inference plus NMS reached only mAP 50:95
+0.000118 and mAR 0.0067 at threshold 0.001 (1,164 predictions). Threshold 0.01
+left 199 predictions with the same negligible metrics; thresholds from 0.05
+up found no correct balls. This YOLO26s setup is rejected and must not be
+integrated into `BallTracker`.
+
+The failed architectures share a measurable data-domain problem. Run
+`tools/analyze_ball_detector_domain.py` on a full-frame COCO export to report
+box size, aspect ratio, sharpness, foreground contrast, local variation, and
+brightness per split and source. On the six-source export, the 197 training
+balls have median brightness 171.4 and foreground contrast 48.8, while the 45
+keeper-holdout balls measure only 92.3 and 27.6. Median size differs less
+severely (18x18 versus 14x14 pixels). Visual inspection confirms that the
+holdout ball is darker, greener/greyer, and less distinct from the pitch.
+Almost every current box is square (median aspect ratio 1.0 in both splits),
+so the reviewed data also does not yet represent genuinely elongated
+motion-blurred balls even though the review tool permits tight rectangular
+boxes. This evidence points to missing real dark, low-contrast, and elongated
+examples; brightness augmentation alone is not proof that the gap is closed.
+Keep `ClipTrainingBallFar` untouched as the benchmark and acquire an
+independent source before moving any comparable keeper footage into training.
+
+A 60-frame sparse review spread over the full 14.6 minutes of
+`brandevoortbrab.mov` added 34 visible balls, eight occluded frames, and 18
+human-confirmed negatives. The visible balls are useful tiny-object examples
+(median 8x8 pixels) and their median foreground contrast of 30.6 approaches
+the keeper holdout's 27.6. They are not a dark-domain solution: their median
+brightness is 148.2 versus 92.3 on the holdout, and all 34 reviewed boxes have
+aspect ratio 1.0. The expanded full-frame dataset contains 231 training
+positives and 45 negatives; its median training brightness moves only from
+171.4 to 165.9. Keep this data, but do not interpret it as closing the dark or
+elongated-ball gaps. The two long Brandevoort files also appear to show the
+same match and camera, so treating them as independent domains would
+overstate diversity.
+
+Validate the split and resolved device without loading or training the model
+with `--dry-run`.
 
 ### Dense review around the first track switch
 
@@ -261,6 +471,42 @@ experiments repeatable and reduces a 30-second reference replay from minutes
 of detector inference to roughly ten seconds on the checked development
 machine. A normal run remains required after detector, person-filter, local
 crop, or camera-motion changes.
+
+Cache schema 2 additionally stores ByteTrack player IDs, current team labels,
+footpoints, and boxes. Schema 1 caches remain readable, but naturally contain
+no stable player identity. `BallTracker` records the nearest confirmed owner
+track and team when a physical ball anchor is close to a tracked footpoint.
+On the dense frames 370-410 this context alone does not improve direct-anchor
+precision: the false candidate is coherent at the foot of the same likely
+owner and is therefore indistinguishable from a partly occluded ball without
+an additional visual identity feature. Player identity must not be presented
+as proof that the candidate itself is the ball.
+
+Candidate training labels can be derived from reviewed manifests with
+`tools/build_active_ball_dataset.py`. Overlapping manifests must agree by
+default. Open placeholders in a later dense manifest never replace an earlier
+human-reviewed annotation; a later human review automatically replaces an
+open placeholder. If a later, denser human review intentionally corrects an
+earlier label, pass `--allow-conflicting-overrides`; the output records every
+replaced frame
+in `overridden_annotation_frames` so the correction remains auditable. The
+current one-clip dataset report is deliberately blocked for training until it
+contains at least 100 positive frames from at least three source clips.
+Build each clip report separately, then combine the reports with
+`tools/aggregate_active_ball_datasets.py`. The aggregator counts distinct
+`source_video` values and rejects duplicate clips. Only sources with at least
+one positive frame count toward the multi-clip readiness requirement, so an
+empty or fully unreviewed manifest cannot make a dataset appear trainable.
+Candidates matching the reviewed ball are positive. Non-matches at least 60
+pixels from the reviewed ball are safe negatives; closer non-matches remain
+ambiguous to avoid teaching the model that a duplicate or slightly misplaced
+ball detection is background. Candidates on reviewed `not_visible` frames are
+always negative.
+Only reviewed `visible` frames are required to have a matching positive
+candidate. An `occluded` annotation records the inferred ball location but
+does not prove that detector-visible ball pixels exist; missing matches on
+those frames are reported separately as `occluded_without_positive_frames`
+and must not be fixed by loosening the geometric match threshold.
 
 ### Player and team possession magnet
 

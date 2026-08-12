@@ -76,13 +76,32 @@ def circle_center_matches_halfway_line(
     model: FullPitchMarkingModel,
     tolerance_m: float = 3.0,
 ) -> bool:
+    return marking_coordinate_matches(
+        center_length_coordinate_m,
+        match,
+        model,
+        "halfway",
+        tolerance_m=tolerance_m,
+    )
+
+
+def marking_coordinate_matches(
+    coordinate_m: float,
+    match: MarkingMatchResult,
+    model: FullPitchMarkingModel,
+    marking_id: str,
+    tolerance_m: float = 3.0,
+) -> bool:
     if tolerance_m <= 0.0 or not match.resolved or not match.hypotheses:
         return False
     best = match.hypotheses[0]
-    if "halfway" not in best.marking_ids:
+    if marking_id not in best.marking_ids:
         return False
-    predicted = best.scale * (model.pitch_length_m / 2.0) + best.translation_m
-    return abs(float(center_length_coordinate_m) - predicted) <= tolerance_m
+    marking = next((item for item in model.lines if item.marking_id == marking_id), None)
+    if marking is None:
+        return False
+    predicted = best.scale * marking.offset_m + best.translation_m
+    return abs(float(coordinate_m) - predicted) <= tolerance_m
 
 
 def create_standard_full_pitch_marking_model(

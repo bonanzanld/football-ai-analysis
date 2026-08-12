@@ -25,6 +25,14 @@ class BallCandidate:
 
 
 @dataclass(frozen=True)
+class PlayerContext:
+    track_id: int | None
+    team_id: int | None
+    footpoint: tuple[float, float]
+    box: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
 class BallObservation:
     frame_number: int
     center: tuple[float, float]
@@ -248,10 +256,21 @@ class BallTracker:
         self._confirmed_active_handoff = False
         self._track_segment = 0
         self._last_player_contact_frame: int | None = None
+        self._last_owner_track_id: int | None = None
+        self._last_owner_team_id: int | None = None
+        self._last_owner_contact_frame: int | None = None
 
     @property
     def observations(self) -> tuple[BallObservation, ...]:
         return tuple(self._observations)
+
+    @property
+    def last_owner_track_id(self) -> int | None:
+        return self._last_owner_track_id
+
+    @property
+    def last_owner_team_id(self) -> int | None:
+        return self._last_owner_team_id
 
     def update(
         self,
@@ -259,6 +278,7 @@ class BallTracker:
         candidates: Iterable[BallCandidate],
         player_footpoints: Iterable[tuple[float, float]] = (),
         player_boxes: Iterable[tuple[float, float, float, float]] = (),
+        player_contexts: Iterable[PlayerContext] = (),
     ) -> BallObservation | None:
         valid = [candidate for candidate in candidates if self._is_valid(candidate)]
         if not self._observations:
@@ -269,6 +289,7 @@ class BallTracker:
             ]
         footpoints = tuple(player_footpoints)
         boxes = tuple(tuple(float(value) for value in box) for box in player_boxes)
+        contexts = tuple(player_contexts)
         trajectory_center = self._predict_center(frame_number)
         predicted_center = (
             None
@@ -280,6 +301,7 @@ class BallTracker:
             predicted_center,
             frame_number,
             footpoints,
+            contexts,
         )
 
         if selected is not None:
@@ -402,6 +424,11 @@ class BallTracker:
             self._detected_observations.append(observation)
             if self._near_player_contact(observation.center, footpoints):
                 self._last_player_contact_frame = int(frame_number)
+            owner = self._nearest_contact_context(observation.center, contexts)
+            if owner is not None:
+                self._last_owner_track_id = owner.track_id
+                self._last_owner_team_id = owner.team_id
+                self._last_owner_contact_frame = int(frame_number)
             if len(self._detected_observations) == 1:
                 # Detector boxes do not always extend to the planted foot. A
                 # slightly wider activity radius still proves that the first
@@ -539,6 +566,7 @@ class BallTracker:
         predicted_center: tuple[float, float] | None,
         frame_number: int,
         player_footpoints: tuple[tuple[float, float], ...],
+        player_contexts: tuple[PlayerContext, ...],
     ) -> BallCandidate | None:
         if not candidates:
             self._pending_early_motion = None
@@ -1193,6 +1221,27 @@ class BallTracker:
             plausible.append(candidate)
         return plausible
 
+    def _nearest_contact_context(
+        self,
+        center: tuple[float, float],
+        player_contexts: tuple[PlayerContext, ...],
+    ) -> PlayerContext | None:
+        eligible = [
+            player
+            for player in player_contexts
+            if player.track_id is not None
+            and float(np.linalg.norm(np.subtract(center, player.footpoint)))
+            <= self.player_contact_radius_pixels
+        ]
+        if not eligible:
+            return None
+        return min(
+            eligible,
+            key=lambda player: float(
+                np.linalg.norm(np.subtract(center, player.footpoint))
+            ),
+        )
+
     def _current_track_has_player_support(
         self,
         frame_number: int,
@@ -1479,104 +1528,34 @@ def exclude_candidates_inside_people(
     crowded_play_radius_pixels: float = 90.0,
     crowded_play_minimum_players: int = 2,
 ) -> list[BallCandidate]:
-    """Remove body, sock and shoe candidates while preserving nearby balls.
+    """Preserve detector evidence even when it overlaps a person.
 
-    A real ball may touch a player's bounding box, so merely testing the
-    candidate centre is too aggressive.  Shoes and socks, however, normally
-    lie almost completely *inside* the lower part of that box.  The overlap
-    test therefore rejects those candidates without removing a ball beside or
-    just below a player's feet.
+    This function used to remove weak head/torso hits and candidates largely
+    inside a player's lower body.  That is an unsafe place to make a hard
+    decision: real balls overlap person boxes during control, tackles,
+    headers, throw-ins, and goalkeeper possession.  Temporal selection and
+    active-ball classification may still reject these candidates later, but
+    the detector evidence must remain available to them.
+
+    The parameters remain for call-site compatibility while cached detector
+    artifacts transition away from the former person-filtering policy.
     """
 
-    people = [tuple(float(value) for value in box) for box in person_boxes]
-    accepted: list[BallCandidate] = []
-    for candidate in candidates:
-        x, y = candidate.center
-        candidate_x1, candidate_y1, candidate_x2, candidate_y2 = candidate.box
-        candidate_area = max(
-            1.0,
-            (candidate_x2 - candidate_x1) * (candidate_y2 - candidate_y1),
-        )
-        overlaps_person_feet = False
-        inside_person_body = False
-        inside_lower_body = False
-        strong_ball_at_feet = False
-        weak_ball_in_leg_zone = False
-        maximum_overlap_seen = 0.0
-        weak_ball_sized = (
-            weak_leg_minimum_confidence
-            <= candidate.confidence
-            < foot_priority_confidence
-            and weak_leg_minimum_size <= min(candidate.size)
-            and max(candidate.size) <= weak_leg_maximum_size
-        )
-        crowded_foot_support = 0
-        for x1, y1, x2, y2 in people:
-            height = y2 - y1
-            lower_start_y = y1 + height * lower_body_start
-            if (
-                weak_ball_sized
-                and lower_start_y <= y <= y2 + foot_priority_radius_pixels
-                and float(
-                    np.linalg.norm(
-                        np.subtract((x, y), ((x1 + x2) / 2.0, y2))
-                    )
-                )
-                <= crowded_play_radius_pixels
-            ):
-                crowded_foot_support += 1
-            foot_zone_horizontal_margin = foot_priority_radius_pixels
-            foot_zone_top = y2 - foot_priority_radius_pixels
-            foot_zone_bottom = y2 + foot_priority_radius_pixels
-            if (
-                candidate.confidence >= foot_priority_confidence
-                and min(candidate.size) >= foot_priority_minimum_size
-                and x1 - foot_zone_horizontal_margin
-                <= x
-                <= x2 + foot_zone_horizontal_margin
-                and foot_zone_top <= y <= foot_zone_bottom
-            ):
-                strong_ball_at_feet = True
-            inside_person_body = inside_person_body or (
-                x1 <= x <= x2 and y1 <= y <= y2
-            )
-            inside_lower_body = inside_lower_body or (
-                x1 <= x <= x2
-                and lower_start_y <= y <= y1 + height * lower_body_end
-            )
-            if (
-                weak_ball_sized
-                and x1 <= x <= x2
-                and lower_start_y <= y <= y1 + height * lower_body_end
-            ):
-                weak_ball_in_leg_zone = True
-
-            overlap_x = max(0.0, min(candidate_x2, x2) - max(candidate_x1, x1))
-            overlap_y = max(
-                0.0,
-                min(candidate_y2, y2) - max(candidate_y1, lower_start_y),
-            )
-            overlap_fraction = (overlap_x * overlap_y) / candidate_area
-            maximum_overlap_seen = max(maximum_overlap_seen, overlap_fraction)
-            if overlap_fraction >= maximum_person_overlap:
-                overlaps_person_feet = True
-                break
-
-        strong_ball_beside_legs = (
-            candidate.confidence >= foot_priority_confidence
-            and min(candidate.size) >= foot_priority_minimum_size
-            and inside_lower_body
-            and maximum_overlap_seen < maximum_person_overlap
-        )
-        weak_ball_in_crowded_play = (
-            weak_ball_sized
-            and crowded_foot_support >= max(2, int(crowded_play_minimum_players))
-        )
-        if strong_ball_at_feet or strong_ball_beside_legs or weak_ball_in_leg_zone or weak_ball_in_crowded_play or (
-            not inside_person_body and not overlaps_person_feet
-        ):
-            accepted.append(candidate)
-    return accepted
+    del (
+        person_boxes,
+        lower_body_start,
+        lower_body_end,
+        maximum_person_overlap,
+        foot_priority_confidence,
+        foot_priority_radius_pixels,
+        foot_priority_minimum_size,
+        weak_leg_minimum_confidence,
+        weak_leg_minimum_size,
+        weak_leg_maximum_size,
+        crowded_play_radius_pixels,
+        crowded_play_minimum_players,
+    )
+    return list(candidates)
 
 
 def save_ball_observations(

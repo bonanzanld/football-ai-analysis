@@ -11,6 +11,10 @@ from football_ai.tracking.projected_track_evaluator import (
     ProjectedTrackEvaluation,
     ProjectedTrackEvaluator,
 )
+from football_ai.tracking.player_plane_constraint_evaluator import (
+    PlayerPlaneConstraintEvaluation,
+    PlayerPlaneConstraintEvaluator,
+)
 from football_ai.tracking.track_evaluator import (
     TrackEvaluation,
     TrackEvaluator,
@@ -92,6 +96,7 @@ class TrackEngine:
                 maximum_reliable_severe_outside_ratio=0.03,
             )
         )
+        self.player_plane_constraint_evaluator = PlayerPlaneConstraintEvaluator()
 
         self.active_player_selector = ActivePlayerSelector(
             minimum_candidate_quality_score=55.0,
@@ -118,6 +123,10 @@ class TrackEngine:
             int,
             ProjectedTrackEvaluation,
         ] = {}
+
+        self.player_plane_constraint_evaluation: (
+            PlayerPlaneConstraintEvaluation | None
+        ) = None
 
         self.active_player_evaluations: dict[
             int,
@@ -168,6 +177,13 @@ class TrackEngine:
             self.active_player_selector.evaluate_all(
                 tracks=tracks,
                 track_evaluations=self.track_evaluations,
+            )
+        )
+
+        self.player_plane_constraint_evaluation = (
+            self.player_plane_constraint_evaluator.evaluate(
+                self.track_evaluations,
+                self.projected_track_evaluations,
             )
         )
 
@@ -771,6 +787,16 @@ class TrackEngine:
             "Tracks ≥80% binnen veld : "
             f"{tracks_mostly_inside}"
         )
+        constraint = self.player_plane_constraint_evaluation
+        if constraint is not None:
+            print(
+                "Spelervlak-constraint   : "
+                f"{constraint.score:.1f} ({constraint.classification})"
+            )
+            print(
+                "Bruikbare spelertracks  : "
+                f"{constraint.usable_track_count}"
+            )
 
     def _print_projected_track_summary(self) -> None:
         """

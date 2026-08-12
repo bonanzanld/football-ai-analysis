@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from football_ai.detection.ball_tracking import BallCandidate
+from football_ai.detection.ball_tracking import BallCandidate, PlayerContext
 from tools.analyze_ball import _build_tracker, _load_candidate_cache, _save_candidate_cache
 
 
@@ -31,6 +31,16 @@ class AnalyzeBallCandidateCacheTests(unittest.TestCase):
                 frame_transforms=[np.eye(3, dtype=np.float64)],
                 accepted_camera_updates=7,
                 rejected_camera_updates=2,
+                frame_player_contexts=[
+                    (
+                        PlayerContext(
+                            track_id=7,
+                            team_id=1,
+                            footpoint=(20.0, 30.0),
+                            box=(10.0, 5.0, 30.0, 30.0),
+                        ),
+                    )
+                ],
             )
 
             loaded = _load_candidate_cache(path)
@@ -41,8 +51,10 @@ class AnalyzeBallCandidateCacheTests(unittest.TestCase):
         self.assertEqual(loaded[2][0][0].confidence, 0.42)
         self.assertEqual(loaded[3], [((20.0, 30.0),)])
         self.assertEqual(loaded[4], [((10.0, 5.0, 30.0, 30.0),)])
-        np.testing.assert_array_equal(loaded[5][0], np.eye(3))
-        self.assertEqual(loaded[6:], (7, 2))
+        self.assertEqual(loaded[5][0][0].track_id, 7)
+        self.assertEqual(loaded[5][0][0].team_id, 1)
+        np.testing.assert_array_equal(loaded[6][0], np.eye(3))
+        self.assertEqual(loaded[7:], (7, 2))
 
 
 if __name__ == "__main__":

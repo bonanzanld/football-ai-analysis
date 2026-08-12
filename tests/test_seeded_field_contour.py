@@ -27,6 +27,13 @@ class SeededFieldContourTests(unittest.TestCase):
             {"name": "zijlijn_voor", "from": "linksvoor", "to": "rechtsvoor"},
             data["boundaries"],
         )
+        self.assertTrue(data["metric_dimensions_are_nominal"])
+        self.assertEqual(data["pitch_length_bounds_m"], [60.0, 70.0])
+        self.assertEqual(data["pitch_width_bounds_m"], [42.5, 55.0])
+        self.assertEqual(
+            [corner["normalized_pitch_point"] for corner in data["corners"]],
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+        )
 
     def test_uses_selected_match_profile_dimensions(self) -> None:
         seeds = (
@@ -39,6 +46,7 @@ class SeededFieldContourTests(unittest.TestCase):
         self.assertEqual(contour.match_format, "6v6")
         self.assertEqual(contour.pitch_length_m, 42.5)
         self.assertEqual(contour.pitch_width_m, 30.0)
+        self.assertFalse(contour.to_dict()["metric_dimensions_are_nominal"])
 
 
 if __name__ == "__main__":

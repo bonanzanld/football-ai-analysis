@@ -20,6 +20,7 @@ from football_ai.detection.ball_tracking import (
     BallCandidate,
     BallObservation,
     BallTracker,
+    PlayerContext,
     best_local_search_anchor,
     candidates_from_detections,
     exclude_candidates_inside_people,
@@ -29,6 +30,8 @@ from football_ai.detection.ball_tracking import (
     save_ball_observations,
 )
 from football_ai.detector import FootballDetector
+from football_ai.classification.team_classifier import TeamClassifier
+from football_ai.tracker import FootballTracker
 from football_ai.tracking.online_camera_motion import (
     OnlineCameraMotion,
     transform_box,
@@ -117,9 +120,12 @@ def _save_candidate_cache(
     frame_transforms: list[np.ndarray],
     accepted_camera_updates: int,
     rejected_camera_updates: int,
+    frame_player_contexts: list[tuple[PlayerContext, ...]] | None = None,
 ) -> None:
+    if frame_player_contexts is None:
+        frame_player_contexts = [tuple() for _ in frame_candidates]
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_video": str(source_video),
         "fps": float(fps),
         "accepted_camera_updates": int(accepted_camera_updates),
@@ -132,12 +138,22 @@ def _save_candidate_cache(
                 ],
                 "player_footpoints": [list(point) for point in footpoints],
                 "player_boxes": [list(box) for box in boxes],
+                "players": [
+                    {
+                        "track_id": player.track_id,
+                        "team_id": player.team_id,
+                        "footpoint": list(player.footpoint),
+                        "box": list(player.box),
+                    }
+                    for player in players
+                ],
                 "transform": transform.tolist(),
             }
-            for candidates, footpoints, boxes, transform in zip(
+            for candidates, footpoints, boxes, players, transform in zip(
                 frame_candidates,
                 frame_player_footpoints,
                 frame_player_boxes,
+                frame_player_contexts,
                 frame_transforms,
                 strict=True,
             )
@@ -154,12 +170,13 @@ def _load_candidate_cache(
     list[tuple[BallCandidate, ...]],
     list[tuple[tuple[float, float], ...]],
     list[tuple[tuple[float, float, float, float], ...]],
+    list[tuple[PlayerContext, ...]],
     list[np.ndarray],
     int,
     int,
 ]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") not in (1, 2):
         raise ValueError(f"Onbekende kandidaatcache-versie: {payload.get('schema_version')}")
     frames = payload.get("frames")
     if not isinstance(frames, list) or not frames:
@@ -188,6 +205,22 @@ def _load_candidate_cache(
         )
         for frame in frames
     ]
+    frame_player_contexts = [
+        tuple(
+            PlayerContext(
+                track_id=(
+                    None if player.get("track_id") is None else int(player["track_id"])
+                ),
+                team_id=(
+                    None if player.get("team_id") is None else int(player["team_id"])
+                ),
+                footpoint=tuple(float(value) for value in player["footpoint"]),
+                box=tuple(float(value) for value in player["box"]),
+            )
+            for player in frame.get("players", [])
+        )
+        for frame in frames
+    ]
     frame_transforms = [
         np.asarray(frame["transform"], dtype=np.float64)
         for frame in frames
@@ -198,6 +231,7 @@ def _load_candidate_cache(
         frame_candidates,
         frame_player_footpoints,
         frame_player_boxes,
+        frame_player_contexts,
         frame_transforms,
         int(payload.get("accepted_camera_updates", 0)),
         int(payload.get("rejected_camera_updates", 0)),
@@ -271,6 +305,7 @@ def main() -> None:
             frame_candidates,
             frame_player_footpoints,
             frame_player_boxes,
+            frame_player_contexts,
             frame_transforms,
             accepted_camera_updates,
             rejected_camera_updates,
@@ -289,8 +324,11 @@ def main() -> None:
         frame_candidates = []
         frame_player_footpoints = []
         frame_player_boxes = []
+        frame_player_contexts = []
         frame_transforms = []
         camera_motion = OnlineCameraMotion()
+        player_tracker = FootballTracker(frame_rate=fps)
+        team_classifier = TeamClassifier()
         local_search_center: tuple[float, float] | None = None
         frame_number = 0
 
@@ -303,6 +341,8 @@ def main() -> None:
                 current_to_reference = camera_motion.update(frame)
                 frame_transforms.append(current_to_reference.copy())
                 _, people, ball_detections = detector.detect(frame)
+                tracked_people = player_tracker.update(people)
+                teams = team_classifier.update(frame, tracked_people)
                 candidates = candidates_from_detections(ball_detections)
                 local_candidates: list[BallCandidate] = []
                 if local_search_center is not None:
@@ -354,6 +394,29 @@ def main() -> None:
                         for box in people.xyxy
                     )
                 )
+                frame_player_contexts.append(
+                    tuple(
+                        PlayerContext(
+                            track_id=int(track_id),
+                            team_id=teams.get(int(track_id)),
+                            footpoint=transform_point(
+                                ((float(x1) + float(x2)) / 2.0, float(y2)),
+                                current_to_reference,
+                            ),
+                            box=transform_box(
+                                (float(x1), float(y1), float(x2), float(y2)),
+                                current_to_reference,
+                            ),
+                        )
+                        for (x1, y1, x2, y2), track_id in zip(
+                            tracked_people.xyxy,
+                            tracked_people.tracker_id
+                            if tracked_people.tracker_id is not None
+                            else (),
+                            strict=True,
+                        )
+                    )
+                )
                 frame_number += 1
                 if frame_number % 30 == 0:
                     print(f"Analyse {frame_number}/{maximum_frames} frames")
@@ -368,6 +431,7 @@ def main() -> None:
             frame_candidates=frame_candidates,
             frame_player_footpoints=frame_player_footpoints,
             frame_player_boxes=frame_player_boxes,
+            frame_player_contexts=frame_player_contexts,
             frame_transforms=frame_transforms,
             accepted_camera_updates=accepted_camera_updates,
             rejected_camera_updates=rejected_camera_updates,
@@ -388,6 +452,7 @@ def main() -> None:
             candidates,
             player_footpoints=frame_player_footpoints[analyzed_frame],
             player_boxes=frame_player_boxes[analyzed_frame],
+            player_contexts=frame_player_contexts[analyzed_frame],
         )
         if observation is not None:
             observations_by_frame[analyzed_frame] = observation

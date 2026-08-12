@@ -17,24 +17,33 @@ from football_ai.calibration.bootstrap.detection_profile import create_detection
 from football_ai.calibration.camera_anchor_bank_3d import load_camera_anchor_bank
 from football_ai.calibration.global_frame_graph import (
     AbsoluteGroundConstraint,
+    AbsoluteGroundLineConstraint,
     AbsoluteGroundPointConstraint,
     FrameGraphNode,
     GroundDirectionConstraint,
+    connected_frame_graph_components,
     estimate_ground_frame_edge,
+    homography_local_scale_ratio,
     select_maximum_quality_tree,
     select_cycle_consistent_edges,
     solve_global_frame_graph,
 )
 from football_ai.calibration.full_pitch_markings import (
-    circle_center_matches_halfway_line,
     create_standard_full_pitch_marking_model,
+    marking_coordinate_matches,
     match_marking_offsets,
+)
+from football_ai.calibration.small_sided_pitch_embedding import (
+    FullPitchHalf,
+    PerpendicularHalfPitchEmbedding,
+    embed_full_pitch_markings,
 )
 from football_ai.calibration.ground_line_evidence import GroundLineFamily, detect_metric_ground_lines
 from football_ai.calibration.manual_homography_refinement import (
     refine_ground_homography_with_lines,
     refine_ground_homography_with_vanishing_points,
 )
+from football_ai.calibration.manual_midfield_line import load_manual_midfield_line
 from football_ai.calibration.manual_perspective_reference import (
     PerspectiveDirection,
     load_manual_perspective_reference,
@@ -74,26 +83,104 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=110.0)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--minimum-length", type=float, default=3.0)
+    parser.add_argument("--pruning-rounds", type=int, default=3)
+    parser.add_argument(
+        "--maximum-edge-scale-ratio",
+        type=float,
+        default=1.12,
+        help="Reject local frame edges with a larger abrupt scale change as zoom boundaries.",
+    )
+    parser.add_argument("--full-pitch-length", type=float, default=105.0)
+    parser.add_argument("--full-pitch-width", type=float, default=68.0)
+    parser.add_argument(
+        "--full-pitch-half",
+        choices=("goal_a_half", "goal_b_half"),
+        default="goal_a_half",
+    )
     parser.add_argument(
         "--reference-anchor",
-        choices=("goal-a", "goal-b"),
+        choices=("goal-a", "goal-b", "local-27960", "local-28380", "local-29100", "local-30300"),
         default="goal-a",
         help="Primair 3D-camera-anker waarnaar de framegraph wordt uitgelijnd.",
     )
+    parser.add_argument(
+        "--registration-reference-time",
+        type=float,
+        help="Gebruik dit frame binnen het venster alleen als lokaal framegraph-anker.",
+    )
+    parser.add_argument(
+        "--bridge-anchor-to-window",
+        action="store_true",
+        help="Zoek gecontroleerde grondvlakverbindingen van het metrische anker naar frames in het venster.",
+    )
     args = parser.parse_args()
+    if args.pruning_rounds < 0:
+        parser.error("--pruning-rounds cannot be negative")
+    if args.maximum_edge_scale_ratio <= 1.0:
+        parser.error("--maximum-edge-scale-ratio must exceed one")
 
     video = PROJECT_ROOT / "videos" / args.video
     output_dir = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
-    bank = load_camera_anchor_bank(output_dir / f"{prefix}_camera_anchors_3d.json")
+    bank_suffix = (
+        "_camera_anchors_3d_field_refined.json"
+        if args.reference_anchor.startswith("local-")
+        else "_camera_anchors_3d.json"
+    )
+    bank = load_camera_anchor_bank(output_dir / f"{prefix}{bank_suffix}")
     reference_anchor = next(item for item in bank.anchors if item.anchor_id == args.reference_anchor)
     profile = create_detection_profile(args.format)
+    full_pitch_model = create_standard_full_pitch_marking_model(
+        args.full_pitch_length, args.full_pitch_width
+    )
+    embedding = PerpendicularHalfPitchEmbedding(
+        full_pitch_model.pitch_length_m,
+        full_pitch_model.pitch_width_m,
+        profile.pitch_length_m,
+        profile.pitch_width_m,
+        FullPitchHalf(args.full_pitch_half),
+    )
+    embedded_marking_model = embed_full_pitch_markings(full_pitch_model, embedding)
+    midfield_path = output_dir / f"{prefix}_manual_midfield_line.json"
+    manual_midfield = load_manual_midfield_line(midfield_path) if midfield_path.exists() else None
+    manual_endline_paths = (
+        output_dir / f"{prefix}_manual_8v8_endline.json",
+        output_dir / f"{prefix}_manual_8v8_left_endline.json",
+        output_dir / f"{prefix}_manual_8v8_right_endline.json",
+    )
+    manual_endlines = tuple(
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in manual_endline_paths if path.exists()
+    )
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
         raise FileNotFoundError(f"Video kon niet worden geopend: {video}")
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     times = list(np.arange(args.start, args.start + args.duration + 1e-6, args.interval))
-    times.append(reference_anchor.time_seconds)
+    registration_reference_time = (
+        args.registration_reference_time
+        if args.registration_reference_time is not None
+        else reference_anchor.time_seconds
+    )
+    times.append(registration_reference_time)
+    if args.bridge_anchor_to_window:
+        times.append(reference_anchor.time_seconds)
+        times.extend(float(item["time_seconds"]) for item in manual_endlines)
+    segment_end = args.start + args.duration
+    def in_requested_segment(time_seconds: float) -> bool:
+        return args.start - 1e-6 <= time_seconds <= segment_end + 1e-6
+    if manual_midfield is not None:
+        if in_requested_segment(manual_midfield.time_seconds):
+            times.append(manual_midfield.time_seconds)
+        for frame_number in (
+            manual_midfield.rear_sideline_frame_number,
+            manual_midfield.front_sideline_frame_number,
+        ):
+            if frame_number is not None and in_requested_segment(frame_number / fps):
+                times.append(frame_number / fps)
+    for manual_endline in manual_endlines:
+        if in_requested_segment(float(manual_endline["time_seconds"])):
+            times.append(float(manual_endline["time_seconds"]))
     times = sorted(set(round(float(item), 6) for item in times))
     nodes, frames = [], {}
     for time_seconds in times:
@@ -106,9 +193,10 @@ def main() -> None:
         nodes.append(FrameGraphNode(node_id, frame_number, time_seconds))
         frames[node_id] = frame
     capture.release()
-    reference_id = f"f{reference_anchor.frame_number}"
+    reference_id = f"f{int(round(registration_reference_time * fps))}"
     ordered = tuple(nodes)
     edges = []
+    zoom_boundaries = []
     attempted = 0
     for source_index, source in enumerate(ordered):
         for gap in (1, 2):
@@ -118,19 +206,117 @@ def main() -> None:
             target = ordered[target_index]
             attempted += 1
             try:
-                edges.append(
-                    estimate_ground_frame_edge(
+                edge = estimate_ground_frame_edge(
                         source.node_id,
                         target.node_id,
                         frames[source.node_id],
                         frames[target.node_id],
                     )
-                )
+                scale = homography_local_scale_ratio(edge.source_to_target)
+                symmetric_scale = max(scale, 1.0 / scale)
+                if symmetric_scale > args.maximum_edge_scale_ratio:
+                    zoom_boundaries.append(
+                        {
+                            "source_frame": source.frame_number,
+                            "target_frame": target.frame_number,
+                            "source_time_seconds": source.time_seconds,
+                            "target_time_seconds": target.time_seconds,
+                            "scale_ratio": symmetric_scale,
+                        }
+                    )
+                else:
+                    edges.append(edge)
             except ValueError:
                 pass
         if source_index and source_index % 20 == 0:
             print(f"Graphverbindingen: {source_index}/{len(ordered)} nodes verwerkt")
+    if args.bridge_anchor_to_window:
+        bridge_anchor_ids = {f"f{reference_anchor.frame_number}"}
+        bridge_anchor_ids.update(
+            f"f{int(round(float(item['time_seconds']) * fps))}" for item in manual_endlines
+        )
+        for anchor_id in sorted(bridge_anchor_ids):
+            if anchor_id not in frames:
+                continue
+            bridge_candidates = []
+            for node in ordered:
+                if node.node_id == anchor_id or not in_requested_segment(node.time_seconds):
+                    continue
+                attempted += 1
+                try:
+                    edge = estimate_ground_frame_edge(
+                        anchor_id, node.node_id, frames[anchor_id], frames[node.node_id]
+                    )
+                    scale = homography_local_scale_ratio(edge.source_to_target)
+                    symmetric_scale = max(scale, 1.0 / scale)
+                    if symmetric_scale <= args.maximum_edge_scale_ratio:
+                        bridge_candidates.append(edge)
+                except ValueError:
+                    continue
+            bridge_candidates.sort(
+                key=lambda item: (item.inliers, item.inlier_ratio, -item.median_error_px),
+                reverse=True,
+            )
+            edges.extend(bridge_candidates[:3])
+            if bridge_candidates:
+                best = bridge_candidates[0]
+                print(
+                    f"Ankerbrug: {best.source_id}->{best.target_id} | "
+                    f"{best.inliers} inliers | mediaan {best.median_error_px:.2f}px."
+                )
+        # Repeated camera pans can reconnect temporal components that adjacent
+        # frames miss (players/occlusion or a fast pan). Search only sparse
+        # ten-second representatives to keep this deterministic and bounded.
+        sparse_nodes = [
+            node for node in ordered
+            if in_requested_segment(node.time_seconds)
+            and abs(node.time_seconds / 10.0 - round(node.time_seconds / 10.0)) < 1e-6
+        ]
+        long_candidates = []
+        for source_index, source in enumerate(sparse_nodes):
+            for target in sparse_nodes[source_index + 1:]:
+                if target.time_seconds - source.time_seconds < 10.0:
+                    continue
+                attempted += 1
+                try:
+                    edge = estimate_ground_frame_edge(
+                        source.node_id, target.node_id, frames[source.node_id], frames[target.node_id]
+                    )
+                    scale = homography_local_scale_ratio(edge.source_to_target)
+                    if max(scale, 1.0 / scale) <= args.maximum_edge_scale_ratio:
+                        long_candidates.append(edge)
+                except ValueError:
+                    continue
+        long_candidates.sort(
+            key=lambda item: (item.inliers, item.inlier_ratio, -item.median_error_px),
+            reverse=True,
+        )
+        edges.extend(long_candidates[:8])
+        if long_candidates:
+            best = long_candidates[0]
+            print(
+                f"Vensterbrug: {best.source_id}->{best.target_id} | "
+                f"{best.inliers} inliers | mediaan {best.median_error_px:.2f}px."
+            )
     tree_edges = select_maximum_quality_tree(tuple(ordered), tuple(edges))
+    node_by_id = {item.node_id: item for item in ordered}
+    graph_segments = []
+    for component in connected_frame_graph_components(tuple(ordered), tuple(edges)):
+        component_nodes = sorted((node_by_id[item] for item in component), key=lambda item: item.time_seconds)
+        graph_segments.append(
+            {
+                "node_count": len(component_nodes),
+                "start_frame": component_nodes[0].frame_number,
+                "end_frame": component_nodes[-1].frame_number,
+                "start_time_seconds": component_nodes[0].time_seconds,
+                "end_time_seconds": component_nodes[-1].time_seconds,
+                "contains_reference_anchor": reference_id in component,
+                "contains_manual_midfield": (
+                    manual_midfield is not None
+                    and f"f{manual_midfield.frame_number}" in component
+                ),
+            }
+        )
     tree_solution = solve_global_frame_graph(
         tuple(ordered),
         tree_edges,
@@ -146,6 +332,7 @@ def main() -> None:
     manual_direction_constraints = []
     absolute_ground_constraints = []
     absolute_ground_point_constraints = []
+    absolute_ground_line_constraints = []
     reference_ground_to_image = reference_anchor.projection.ground_homography()
     manual_line_axes: dict[str, tuple[int, ...]] = {}
     manual_path = output_dir / f"{prefix}_manual_perspective_reference.json"
@@ -230,6 +417,92 @@ def main() -> None:
                         f"grondpunten RMS {refinement.rms_point_error_px:.2f}px, "
                         f"max {refinement.maximum_point_error_px:.2f}px."
                     )
+    if manual_midfield is not None:
+        midfield_node_id = f"f{manual_midfield.frame_number}"
+        _small_center_x, midfield_small_y = embedding.full_to_small(
+            (full_pitch_model.pitch_length_m / 2.0, full_pitch_model.pitch_width_m / 2.0)
+        )
+        if midfield_node_id in tree_solution.node_to_reference:
+            absolute_ground_line_constraints.append(
+            AbsoluteGroundLineConstraint(
+                midfield_node_id,
+                np.asarray(
+                    ((0.0, midfield_small_y), (profile.pitch_length_m, midfield_small_y)),
+                    dtype=np.float64,
+                ),
+                np.asarray(manual_midfield.equation, dtype=np.float64),
+                20.0,
+            )
+            )
+        for label, point, frame_number, ground_y in (
+            (
+                "rear",
+                manual_midfield.rear_sideline_point,
+                manual_midfield.rear_sideline_frame_number,
+                0.0,
+            ),
+            (
+                "front",
+                manual_midfield.front_sideline_point,
+                manual_midfield.front_sideline_frame_number,
+                profile.pitch_width_m,
+            ),
+        ):
+            if point is None or frame_number is None:
+                continue
+            node_id = f"f{frame_number}"
+            node_to_reference = tree_solution.node_to_reference.get(node_id)
+            if node_to_reference is None:
+                print(f"Handmatig {label}-zijlijnpunt is niet verbonden; constraint overgeslagen.")
+                continue
+            ground_to_node = np.linalg.inv(node_to_reference) @ reference_ground_to_image
+            vanishing = ground_to_node[:, 0]
+            if abs(float(vanishing[2])) < 1e-9:
+                print(f"Handmatig {label}-zijlijnpunt heeft geen eindig verdwijnpunt; constraint overgeslagen.")
+                continue
+            image_line = np.cross(
+                np.asarray((*point, 1.0), dtype=np.float64),
+                vanishing,
+            )
+            absolute_ground_line_constraints.append(
+                AbsoluteGroundLineConstraint(
+                    node_id,
+                    np.asarray(
+                        ((0.0, ground_y), (profile.pitch_length_m, ground_y)),
+                        dtype=np.float64,
+                    ),
+                    image_line,
+                    20.0,
+                )
+            )
+            print(
+                f"Handmatig {label}-zijlijnpunt toegepast op frame {frame_number} "
+                f"als y={ground_y:.1f}m-lijn."
+            )
+    for manual_endline in manual_endlines:
+        endline_node_id = f'f{int(manual_endline["frame_number"])}'
+        endline_x = float(manual_endline.get("field_x_m", 0.0))
+        if endline_node_id in tree_solution.node_to_reference:
+            absolute_ground_line_constraints.append(
+                AbsoluteGroundLineConstraint(
+                    endline_node_id,
+                    np.asarray(
+                        (
+                            (endline_x, 0.0),
+                            (endline_x, profile.pitch_width_m),
+                        ),
+                        dtype=np.float64,
+                    ),
+                    np.asarray(manual_endline["equation"], dtype=np.float64),
+                    20.0,
+                )
+            )
+            print(
+                f'Handmatige 8v8-achterlijn toegepast op frame {manual_endline["frame_number"]} '
+                f'als x={endline_x:.1f}m-lijn.'
+            )
+        else:
+            print("Handmatige 8v8-achterlijn is niet verbonden; constraint overgeslagen.")
     for node in ordered:
         node_to_reference = tree_solution.node_to_reference.get(node.node_id)
         if node_to_reference is None:
@@ -319,14 +592,14 @@ def main() -> None:
         tuple(ordered),
         consistent_edges,
         reference_id,
-        _pruning_rounds=0,
+        _pruning_rounds=args.pruning_rounds,
         direction_constraints=tuple(direction_constraints),
         reference_ground_to_image=reference_ground_to_image,
         absolute_ground_constraints=tuple(absolute_ground_constraints),
         absolute_ground_point_constraints=tuple(absolute_ground_point_constraints),
+        absolute_ground_line_constraints=tuple(absolute_ground_line_constraints),
     )
     reference_frame = frames[reference_id]
-    full_pitch_model = create_standard_full_pitch_marking_model()
     observations = []
     circle_observations = []
     contributing_nodes = 0
@@ -389,14 +662,14 @@ def main() -> None:
                 if cluster.mean_ground_offset_m is not None
             ),
             family,
-            full_pitch_model,
+            embedded_marking_model,
         )
         for family in line_clusters
     }
     goal_zone_match = match_goal_zone_depth_lines(
         tuple(
             cluster.mean_ground_offset_m
-            for cluster in line_clusters[GroundLineFamily.TRANSVERSE]
+            for cluster in line_clusters[GroundLineFamily.LONGITUDINAL]
             if cluster.mean_ground_offset_m is not None
         ),
         create_goal_zone_reference("unknown"),
@@ -410,17 +683,17 @@ def main() -> None:
             1.0,
             circle_consensus.confidence,
         )
-        transverse_match = marking_matches["transverse"]
         if (
             not validate_ground_circle_on_frame(
                 consensus_evidence,
                 reference_frame,
                 reference_ground_to_image,
             )
-            or not circle_center_matches_halfway_line(
-                circle_consensus.ground_center[0],
-                transverse_match,
-                full_pitch_model,
+            or not marking_coordinate_matches(
+                circle_consensus.ground_center[1],
+                marking_matches[GroundLineFamily.LONGITUDINAL.value],
+                embedded_marking_model,
+                "halfway",
             )
         ):
             circle_consensus = None
@@ -482,8 +755,10 @@ def main() -> None:
     cv2.rectangle(preview, (0, 0), (preview.shape[1], 78), (20, 20, 20), -1)
     cv2.putText(preview, f"GLOBAL FRAMEGRAPH | nodes {len(solution.connected_nodes)}/{len(nodes)} | edges gebruikt {solution.used_edges}/{len(edges)} | {status}", (14, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.57, (255, 255, 255), 2, cv2.LINE_AA)
     anchor_suffix = "" if args.reference_anchor == "goal-a" else f"_{args.reference_anchor}"
-    preview_path = output_dir / f"{prefix}_global_frame_graph_ground{anchor_suffix}_qa.jpg"
-    report_path = output_dir / f"{prefix}_global_frame_graph_ground{anchor_suffix}_qa.json"
+    placement_suffix = "" if embedding.half is FullPitchHalf.GOAL_A else "_half-goal-b"
+    output_suffix = f"{anchor_suffix}{placement_suffix}"
+    preview_path = output_dir / f"{prefix}_global_frame_graph_ground{output_suffix}_qa.jpg"
+    report_path = output_dir / f"{prefix}_global_frame_graph_ground{output_suffix}_qa.json"
     cv2.imwrite(str(preview_path), preview)
     report = {
         "schema_version": 1,
@@ -493,9 +768,13 @@ def main() -> None:
         "rejected_nodes": list(solution.rejected_nodes),
         "attempted_edges": attempted,
         "accepted_edges": len(edges),
+        "zoom_boundary_edges": zoom_boundaries,
+        "zoom_stable_segments": graph_segments,
+        "maximum_edge_scale_ratio": args.maximum_edge_scale_ratio,
         "tree_edges": len(tree_edges),
         "cycle_consistent_edges": len(consistent_edges),
         "direction_constraints": len(direction_constraints),
+        "absolute_ground_line_constraints": len(absolute_ground_line_constraints),
         "used_edges": solution.used_edges,
         "edge_rms_px": solution.edge_rms_px,
         "maximum_edge_error_px": solution.maximum_edge_error_px,
@@ -508,6 +787,13 @@ def main() -> None:
             "center_circle_radius_m": full_pitch_model.center_circle_radius_m,
             "penalty_area_depth_m": full_pitch_model.penalty_area_depth_m,
             "goal_area_depth_m": full_pitch_model.goal_area_depth_m,
+            "embedding": {
+                "half": embedding.half.value,
+                "rotation_degrees": 90,
+                "full_sideline_margin_m": embedding.full_sideline_margin_m,
+                "half_end_margin_m": embedding.half_end_margin_m,
+                "corners_on_full_pitch": embedding.corners_on_full_pitch,
+            },
         },
         "marking_matches": {
             family: result.to_dict() for family, result in marking_matches.items()
@@ -578,7 +864,7 @@ def main() -> None:
         playable_solved,
         registration_reason,
     )
-    registration_path = output_dir / f"{prefix}_global_ground_registration.json"
+    registration_path = output_dir / f"{prefix}_global_ground_registration{placement_suffix}.json"
     save_global_ground_registration(registration, registration_path)
     print(f"Nodes verbonden: {len(solution.connected_nodes)}/{len(nodes)}")
     print(f"Edges lokaal geldig: {len(edges)}/{attempted} | globaal gebruikt: {solution.used_edges} | RMS {solution.edge_rms_px:.2f}px | max {solution.maximum_edge_error_px:.2f}px")

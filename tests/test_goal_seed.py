@@ -10,6 +10,7 @@ from football_ai.calibration.bootstrap.goal_detection import measure_backline_su
 from football_ai.calibration.bootstrap.goal_seed import (
     GoalSeed,
     estimate_backline_endpoints,
+    estimate_pitch_width_from_centered_goal,
     fit_average_support_line,
     load_goal_seeds,
     save_goal_seeds,
@@ -17,6 +18,25 @@ from football_ai.calibration.bootstrap.goal_seed import (
 
 
 class GoalSeedTests(unittest.TestCase):
+    def test_estimates_pitch_width_from_goal_and_both_corners(self) -> None:
+        width = 49.0
+        goal = 5.0
+
+        def project(metres: float) -> tuple[float, float]:
+            return ((3.0 * metres + 40.0) / (0.015 * metres + 1.0), 80.0)
+
+        estimate = estimate_pitch_width_from_centered_goal(
+            project(0.0),
+            project((width - goal) / 2.0),
+            project((width + goal) / 2.0),
+            project(width),
+            goal_width_m=goal,
+            pitch_width_bounds_m=(42.5, 55.0),
+        )
+
+        self.assertAlmostEqual(estimate.pitch_width_m, width, places=4)
+        self.assertLess(estimate.rms_error_px, 1e-6)
+
     def test_average_support_line_absorbs_click_margin(self) -> None:
         start, end, rms = fit_average_support_line(
             ((100.0, 202.0), (300.0, 198.0), (500.0, 204.0))

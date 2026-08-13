@@ -66,6 +66,70 @@ def select_box_review_candidates(payload: dict, maximum_windows: int = 4) -> dic
     }
 
 
+def select_competitor_box_candidates(
+    review_candidates: dict,
+    people: dict,
+    *,
+    maximum_examples: int = 12,
+) -> dict:
+    """Select hard alternative people beside confirmed keeper paths for review."""
+    if maximum_examples < 1:
+        raise ValueError("Maximum aantal voorbeelden moet positief zijn.")
+    by_frame = {
+        (str(record["goal"]), int(record["frame_number"])): record
+        for record in people.get("records", ())
+    }
+    pool = []
+    for window in review_candidates.get("windows", ()):
+        if window.get("quality", {}).get("classification") != "consistent_review_candidate":
+            continue
+        path = window.get("path", ())
+        for position, index in zip(("first", "middle", "last"), sorted({0, len(path) // 2, len(path) - 1})):
+            keeper = path[index]
+            record = by_frame.get((str(window["goal"]), int(keeper["frame_number"])))
+            if record is None:
+                continue
+            alternatives = [
+                item for item in record.get("candidates", ())
+                if _box_iou(item["box"], keeper["box"]) < 0.20
+            ]
+            if not alternatives:
+                continue
+            alternative = max(alternatives, key=lambda item: float(item["goal_proximity_score"]))
+            pool.append({
+                "candidate_id": (
+                    f"competitor:{window['goal']}:{float(window['start_seconds']):.3f}:"
+                    f"{int(alternative.get('frame_number', keeper['frame_number']))}:{position}"
+                ),
+                "goal": str(window["goal"]),
+                "window_start_seconds": float(window["start_seconds"]),
+                "frame_number": int(keeper["frame_number"]),
+                "box": list(map(float, alternative["box"])),
+                "footpoint": list(map(float, alternative["footpoint"])),
+                "goal_relative_position": (
+                    list(map(float, alternative["goal_relative_position"]))
+                    if alternative.get("goal_relative_position") is not None else None
+                ),
+                "selection_reason": "highest_goal_proximity_non_keeper_path_competitor",
+            })
+    if len(pool) > maximum_examples:
+        indices = _spread_indices(len(pool), maximum_examples)
+        pool = [pool[index] for index in indices]
+    return {
+        "schema_version": 1,
+        "video_name": str(review_candidates["video_name"]),
+        "examples": pool,
+    }
+
+
+def _box_iou(first, second) -> float:
+    ax1, ay1, ax2, ay2 = map(float, first)
+    bx1, by1, bx2, by2 = map(float, second)
+    intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - intersection
+    return intersection / union if union > 0 else 0.0
+
+
 def _spread_indices(length: int, count: int) -> tuple[int, ...]:
     if length <= count:
         return tuple(range(length))

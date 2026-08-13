@@ -69,5 +69,26 @@ def project_anchored_goal(
     )
 
 
+def project_anchored_goal_line(
+    ground_points: tuple[tuple[float, float], tuple[float, float]],
+    full_frame_edge: FrameGraphEdge,
+    ground_frame_edge: FrameGraphEdge,
+    *,
+    maximum_model_disagreement_px: float = 8.0,
+) -> AnchoredGoalProjection:
+    """Propagate goal feet when no reliable crossbar annotations exist."""
+    ground = np.asarray(ground_points, dtype=np.float32)
+    projected_ground = _project(ground, ground_frame_edge.source_to_target)
+    full_ground = _project(ground, full_frame_edge.source_to_target)
+    disagreement = float(np.max(np.linalg.norm(projected_ground - full_ground, axis=1)))
+    valid = bool(
+        disagreement <= maximum_model_disagreement_px
+        and full_frame_edge.inliers >= 30
+        and ground_frame_edge.inliers >= 30
+    )
+    points = tuple(tuple(map(float, item)) for item in projected_ground)
+    return AnchoredGoalProjection(points, (), disagreement, valid)
+
+
 def _project(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return cv2.perspectiveTransform(points.reshape(1, -1, 2), matrix).reshape(-1, 2)

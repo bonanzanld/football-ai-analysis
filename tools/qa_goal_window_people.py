@@ -28,12 +28,17 @@ def main() -> None:
     parser.add_argument("--format", default="8v8")
     parser.add_argument("--player-threshold", type=float, default=0.20)
     parser.add_argument("--maximum-distance-ratio", type=float, default=0.12)
+    parser.add_argument("--maximum-windows-per-goal", type=int, default=None)
     args = parser.parse_args()
     video = PROJECT_ROOT / "videos" / args.video
     output = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
     tracking_path = output / f"{prefix}_anchored_goal_tracking_qa.json"
     tracking = json.loads(tracking_path.read_text(encoding="utf-8"))["records"]
+    if args.maximum_windows_per_goal is not None:
+        if args.maximum_windows_per_goal < 1:
+            parser.error("Maximum aantal vensters moet positief zijn.")
+        tracking = list(_select_spread_windows(tracking, args.maximum_windows_per_goal))
 
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
@@ -96,6 +101,26 @@ def main() -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload["summary"], indent=2))
     print(f"Doelvenster-personen-QA: {path}")
+
+
+def _select_spread_windows(records, maximum_per_goal, maximum_gap=0.75):
+    selected = []
+    for goal in ("A", "B"):
+        items = sorted(
+            (item for item in records if item["goal"] == goal),
+            key=lambda item: float(item["time_seconds"]),
+        )
+        windows = []
+        for item in items:
+            if not windows or float(item["time_seconds"]) - float(windows[-1][-1]["time_seconds"]) > maximum_gap:
+                windows.append([])
+            windows[-1].append(item)
+        eligible = [window for window in windows if len(window) >= 3]
+        if len(eligible) > maximum_per_goal:
+            indices = np.linspace(0, len(eligible) - 1, maximum_per_goal).round().astype(int)
+            eligible = [eligible[index] for index in indices]
+        selected.extend(item for window in eligible for item in window)
+    return tuple(sorted(selected, key=lambda item: (item["goal"], item["time_seconds"])))
 
 
 if __name__ == "__main__":

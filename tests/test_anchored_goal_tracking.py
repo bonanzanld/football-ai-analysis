@@ -1,6 +1,10 @@
 import numpy as np
 
-from football_ai.calibration.anchored_goal_tracking import contiguous_goal_windows, project_anchored_goal
+from football_ai.calibration.anchored_goal_tracking import (
+    contiguous_goal_windows,
+    project_anchored_goal,
+    project_anchored_goal_line,
+)
 from football_ai.calibration.global_frame_graph import FrameGraphEdge
 
 
@@ -21,6 +25,15 @@ def test_rejects_parallax_disagreement_at_goal_feet():
     result = project_anchored_goal(((10, 20), (30, 20)), ((10, 5), (30, 5)), _edge(full), _edge(ground))
     assert not result.valid
     assert result.model_disagreement_px == 25.0
+
+
+def test_ground_only_projection_keeps_same_parallax_guard():
+    matrix = ((1, 0, 5), (0, 1, 3), (0, 0, 1))
+    result = project_anchored_goal_line(((10, 20), (30, 20)), _edge(matrix), _edge(matrix))
+
+    assert result.valid
+    assert result.ground_points == ((15.0, 23.0), (35.0, 23.0))
+    assert result.top_points == ()
 
 
 def test_groups_goal_samples_into_local_windows():

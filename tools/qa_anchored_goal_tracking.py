@@ -14,7 +14,12 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from football_ai.calibration.anchored_goal_tracking import contiguous_goal_windows, project_anchored_goal
+from football_ai.calibration.anchored_goal_tracking import (
+    contiguous_goal_windows,
+    project_anchored_goal,
+    project_anchored_goal_line,
+)
+from football_ai.calibration.bootstrap.goal_seed import load_goal_seeds
 from football_ai.calibration.global_frame_graph import (
     estimate_frame_edge,
     estimate_ground_frame_edge,
@@ -31,6 +36,7 @@ def main() -> None:
     parser.add_argument("--local-interval", type=float, default=0.5)
     parser.add_argument("--maximum-scale-ratio", type=float, default=1.12)
     parser.add_argument("--maximum-model-disagreement", type=float, default=12.0)
+    parser.add_argument("--ground-only", action="store_true", help="Gebruik bevestigde doelvoeten zonder latpunten.")
     args = parser.parse_args()
     if args.sample_interval <= 0 or args.local_interval <= 0 or args.local_radius < 0:
         parser.error("Intervallen moeten positief zijn en de lokale radius mag niet negatief zijn.")
@@ -44,19 +50,25 @@ def main() -> None:
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     duration = float(capture.get(cv2.CAP_PROP_FRAME_COUNT)) / fps
 
-    anchors = []
-    for goal in ("A", "B"):
-        data = json.loads((output / f"{prefix}_view_{goal}_3d.json").read_text(encoding="utf-8"))["view"]
-        points = {item["landmark_id"]: tuple(item["image_point"]) for item in data["observations"]}
-        key = goal.lower()
-        anchors.append(
-            (
-                goal,
-                float(data["frame_number"]) / fps,
-                (points[f"goal_{key}_rear_bottom"], points[f"goal_{key}_front_bottom"]),
-                (points[f"goal_{key}_rear_top"], points[f"goal_{key}_front_top"]),
+    if args.ground_only:
+        anchors = [
+            (seed.goal_id, seed.time_seconds, (seed.first_ground, seed.second_ground), ())
+            for seed in load_goal_seeds(output / f"{prefix}_goal_seeds.json")
+        ]
+    else:
+        anchors = []
+        for goal in ("A", "B"):
+            data = json.loads((output / f"{prefix}_view_{goal}_3d.json").read_text(encoding="utf-8"))["view"]
+            points = {item["landmark_id"]: tuple(item["image_point"]) for item in data["observations"]}
+            key = goal.lower()
+            anchors.append(
+                (
+                    goal,
+                    float(data["frame_number"]) / fps,
+                    (points[f"goal_{key}_rear_bottom"], points[f"goal_{key}_front_bottom"]),
+                    (points[f"goal_{key}_rear_top"], points[f"goal_{key}_front_top"]),
+                )
             )
-        )
 
     records = []
     try:
@@ -69,7 +81,7 @@ def main() -> None:
                     continue
                 record = _evaluate(
                     capture, fps, anchor, goal, anchor_time, float(time_seconds), ground, top,
-                    args.maximum_scale_ratio, args.maximum_model_disagreement,
+                    args.maximum_scale_ratio, args.maximum_model_disagreement, args.ground_only,
                 )
                 if record is not None:
                     accepted_coarse.append(float(time_seconds))
@@ -84,7 +96,7 @@ def main() -> None:
             for time_seconds in sorted(local_times - existing):
                 record = _evaluate(
                     capture, fps, anchor, goal, anchor_time, time_seconds, ground, top,
-                    args.maximum_scale_ratio, args.maximum_model_disagreement,
+                    args.maximum_scale_ratio, args.maximum_model_disagreement, args.ground_only,
                 )
                 if record is not None:
                     records.append(record | {"source": "local_fill"})
@@ -126,15 +138,22 @@ def _read(capture: cv2.VideoCapture, time_seconds: float, fps: float) -> np.ndar
     return frame
 
 
-def _evaluate(capture, fps, anchor, goal, anchor_time, time_seconds, ground, top, maximum_scale, maximum_disagreement):
+def _evaluate(capture, fps, anchor, goal, anchor_time, time_seconds, ground, top, maximum_scale, maximum_disagreement, ground_only):
     try:
         target = _read(capture, time_seconds, fps)
         full = estimate_frame_edge("anchor", "target", anchor, target)
         plane = estimate_ground_frame_edge("anchor", "target", anchor, target)
         scale = homography_local_scale_ratio(plane.source_to_target)
         scale_ratio = max(scale, 1.0 / scale)
-        result = project_anchored_goal(
-            ground, top, full, plane, maximum_model_disagreement_px=maximum_disagreement
+        result = (
+            project_anchored_goal_line(
+                ground, full, plane,
+                maximum_model_disagreement_px=min(maximum_disagreement, 8.0),
+            )
+            if ground_only
+            else project_anchored_goal(
+                ground, top, full, plane, maximum_model_disagreement_px=maximum_disagreement
+            )
         )
         if not result.valid or scale_ratio > maximum_scale:
             return None

@@ -9,7 +9,8 @@ def _window(start):
         "goal": "A", "start_seconds": start,
         "quality": {"classification": "ambiguous"},
         "path": [
-            {"frame_number": start * 10 + index, "box": [1, 2, 3, 4], "footpoint": [2, 4]}
+            {"frame_number": start * 10 + index, "box": [1, 2, 3, 4], "footpoint": [2, 4],
+             "goal_relative_position": [.5, -.1]}
             for index in range(5)
         ],
     }
@@ -22,11 +23,13 @@ def test_selects_three_displayed_boxes_from_spread_ambiguous_windows():
 
     assert len(result["examples"]) == 9
     assert [item["window_start_seconds"] for item in result["examples"][::3]] == [0, 2, 5]
+    assert result["examples"][0]["goal_relative_position"] == [.5, -.1]
 
 
 def test_exports_individual_positive_and_negative_box_answers():
     candidates = {"video_name": "match.mp4", "examples": [
-        {"candidate_id": "a", "frame_number": 1, "box": [1, 2, 3, 4], "goal": "A"},
+        {"candidate_id": "a", "frame_number": 1, "box": [1, 2, 3, 4], "goal": "A",
+         "goal_relative_position": [.5, -.1]},
         {"candidate_id": "b", "frame_number": 2, "box": [5, 6, 7, 8], "goal": "B"},
     ]}
     reviews = {"human_reviewed": True, "reviews": [
@@ -38,3 +41,4 @@ def test_exports_individual_positive_and_negative_box_answers():
 
     assert [item["label"] for item in result["examples"]] == ["keeper", "not_keeper"]
     assert all(item["review_scope"] == "single_displayed_box" for item in result["examples"])
+    assert result["examples"][0]["goal_relative_position"] == [.5, -.1]

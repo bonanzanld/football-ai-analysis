@@ -16,6 +16,10 @@ def build_box_review_examples(candidates: dict, reviews: dict) -> dict:
             "label": answer,
             "goal": str(item["goal"]),
             "candidate_id": str(item["candidate_id"]),
+            "goal_relative_position": (
+                list(map(float, item["goal_relative_position"]))
+                if item.get("goal_relative_position") is not None else None
+            ),
             "review_scope": "single_displayed_box",
             "provenance": "human_reviewed_single_goalkeeper_box",
         })
@@ -50,6 +54,10 @@ def select_box_review_candidates(payload: dict, maximum_windows: int = 4) -> dic
                 "frame_number": int(item["frame_number"]),
                 "box": list(map(float, item["box"])),
                 "footpoint": list(map(float, item["footpoint"])),
+                "goal_relative_position": (
+                    list(map(float, item["goal_relative_position"]))
+                    if item.get("goal_relative_position") is not None else None
+                ),
             })
     return {
         "schema_version": 1,

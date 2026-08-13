@@ -72,6 +72,7 @@ def main() -> None:
                     "footpoint": footpoint,
                     "confidence": float(confidence),
                     "goal_proximity_score": score,
+                    "goal_relative_position": _goal_relative_position(footpoint, line),
                 })
             candidates.sort(key=lambda item: item["goal_proximity_score"], reverse=True)
             records.append({
@@ -101,6 +102,20 @@ def main() -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload["summary"], indent=2))
     print(f"Doelvenster-personen-QA: {path}")
+
+
+def _goal_relative_position(point, line):
+    first = np.asarray(line.first_post, dtype=np.float64)
+    second = np.asarray(line.second_post, dtype=np.float64)
+    vector = second - first
+    length = float(np.linalg.norm(vector))
+    if length <= 1e-6:
+        return (0.0, 0.0)
+    direction = vector / length
+    offset = np.asarray(point, dtype=np.float64) - first
+    along = float(np.dot(offset, direction) / length)
+    perpendicular = float((direction[0] * offset[1] - direction[1] * offset[0]) / length)
+    return (along, perpendicular)
 
 
 def _select_spread_windows(records, maximum_per_goal, maximum_gap=0.75):

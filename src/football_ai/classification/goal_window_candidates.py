@@ -11,6 +11,7 @@ class GoalWindowPerson:
     goal_proximity_score: float
     box: tuple[float, float, float, float]
     shirt_feature: tuple[float, ...] | None = None
+    goal_relative_position: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +48,7 @@ def evaluate_goal_person_path(
         raise ValueError("Frame diagonal must be positive")
     if not path:
         return GoalPersonPathQuality(0, 0.0, 0.0, 0.0, "unavailable")
-    steps = tuple(
-        hypot(second.footpoint[0] - first.footpoint[0], second.footpoint[1] - first.footpoint[1])
-        / frame_diagonal
-        for first, second in zip(path, path[1:])
-    )
+    steps = tuple(_movement_ratio(first, second, frame_diagonal) for first, second in zip(path, path[1:]))
     proximity = sum(item.goal_proximity_score for item in path) / len(path)
     maximum_step = max(steps, default=0.0)
     mean_step = sum(steps) / max(1, len(steps))
@@ -77,7 +74,8 @@ def select_continuous_goal_person(
         raise ValueError("Frame diagonal, movement and shirt thresholds must be positive")
     if not frames or any(not frame for frame in frames):
         return ()
-    costs = [-item.goal_proximity_score for item in frames[0]]
+    frames = tuple(_prefer_goal_mouth_candidates(frame) for frame in frames)
+    costs = [-item.goal_proximity_score - _between_posts_bonus(item) for item in frames[0]]
     parents: list[list[int]] = []
     for previous, current in zip(frames, frames[1:]):
         next_costs = []
@@ -85,10 +83,16 @@ def select_continuous_goal_person(
         for candidate in current:
             options = []
             for index, other in enumerate(previous):
-                distance_ratio = hypot(
-                    candidate.footpoint[0] - other.footpoint[0],
-                    candidate.footpoint[1] - other.footpoint[1],
-                ) / frame_diagonal
+                if candidate.goal_relative_position is not None and other.goal_relative_position is not None:
+                    distance_ratio = hypot(
+                        candidate.goal_relative_position[0] - other.goal_relative_position[0],
+                        candidate.goal_relative_position[1] - other.goal_relative_position[1],
+                    ) * 0.04
+                else:
+                    distance_ratio = hypot(
+                        candidate.footpoint[0] - other.footpoint[0],
+                        candidate.footpoint[1] - other.footpoint[1],
+                    ) / frame_diagonal
                 transition = distance_ratio / maximum_step_ratio
                 if distance_ratio > maximum_step_ratio:
                     transition += 4.0
@@ -99,7 +103,9 @@ def select_continuous_goal_person(
                     transition += shirt_distance_weight * shirt_distance
                     if shirt_distance > maximum_shirt_distance:
                         transition += 8.0
-                options.append(costs[index] + transition - candidate.goal_proximity_score)
+                options.append(
+                    costs[index] + transition - candidate.goal_proximity_score - _between_posts_bonus(candidate)
+                )
             parent = min(range(len(options)), key=options.__getitem__)
             next_parents.append(parent)
             next_costs.append(options[parent])
@@ -121,3 +127,34 @@ def _shirt_distance(first: GoalWindowPerson, second: GoalWindowPerson) -> float 
     return sum(
         (left - right) ** 2 for left, right in zip(first.shirt_feature, second.shirt_feature)
     ) ** 0.5
+
+
+def _movement_ratio(first: GoalWindowPerson, second: GoalWindowPerson, frame_diagonal: float) -> float:
+    if first.goal_relative_position is not None and second.goal_relative_position is not None:
+        return hypot(
+            second.goal_relative_position[0] - first.goal_relative_position[0],
+            second.goal_relative_position[1] - first.goal_relative_position[1],
+        ) * 0.04
+    return hypot(
+        second.footpoint[0] - first.footpoint[0],
+        second.footpoint[1] - first.footpoint[1],
+    ) / frame_diagonal
+
+
+def _between_posts_bonus(person: GoalWindowPerson) -> float:
+    if person.goal_relative_position is None:
+        return 0.0
+    along, perpendicular = person.goal_relative_position
+    return 1.25 if 0.0 <= along <= 1.0 and abs(perpendicular) <= 0.65 else 0.0
+
+
+def _prefer_goal_mouth_candidates(
+    frame: tuple[GoalWindowPerson, ...],
+) -> tuple[GoalWindowPerson, ...]:
+    preferred = tuple(
+        person for person in frame
+        if person.goal_relative_position is not None
+        and 0.0 <= person.goal_relative_position[0] <= 1.0
+        and abs(person.goal_relative_position[1]) <= 0.25
+    )
+    return preferred or frame

@@ -48,6 +48,7 @@ def main() -> None:
                         int(record["frame_number"]), tuple(candidate["footpoint"]),
                         float(candidate["goal_proximity_score"]), tuple(candidate["box"]),
                         _shirt_feature(capture, int(record["frame_number"]), candidate["box"]),
+                        tuple(candidate["goal_relative_position"]) if candidate.get("goal_relative_position") else None,
                     )
                     for candidate in record["candidates"]
                 )
@@ -76,7 +77,8 @@ def main() -> None:
                 },
                 "path": [
                     {"frame_number": item.frame_number, "footpoint": item.footpoint,
-                     "goal_proximity_score": item.goal_proximity_score, "box": item.box}
+                     "goal_proximity_score": item.goal_proximity_score, "box": item.box,
+                     "goal_relative_position": item.goal_relative_position}
                     for item in path
                 ],
             })

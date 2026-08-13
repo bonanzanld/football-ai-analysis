@@ -30,6 +30,7 @@ from football_ai.detection.ball_tracking import (
     save_ball_observations,
 )
 from football_ai.detector import FootballDetector
+from football_ai.privacy import anonymize_people_heads
 from football_ai.classification.team_classifier import TeamClassifier
 from football_ai.tracker import FootballTracker
 from football_ai.tracking.online_camera_motion import (
@@ -107,6 +108,20 @@ def _observations_to_image_space(
             )
         )
     return converted
+
+
+def _boxes_to_image_space(
+    boxes: tuple[tuple[float, float, float, float], ...],
+    current_to_reference: np.ndarray,
+) -> np.ndarray:
+    try:
+        reference_to_image = np.linalg.inv(current_to_reference)
+    except np.linalg.LinAlgError:
+        reference_to_image = np.eye(3, dtype=np.float64)
+    return np.asarray(
+        [transform_box(box, reference_to_image) for box in boxes],
+        dtype=np.float64,
+    ).reshape(-1, 4)
 
 
 def _save_candidate_cache(
@@ -280,6 +295,11 @@ def main() -> None:
         "--reuse-candidates",
         action="store_true",
         help="Sla detectorinferentie over en laad de eerder opgeslagen kandidaatcache.",
+    )
+    parser.add_argument(
+        "--no-anonymize",
+        action="store_true",
+        help="Schakel hoofdvervaging alleen uit voor intern diagnosewerk.",
     )
     args = parser.parse_args()
 
@@ -507,6 +527,14 @@ def main() -> None:
             success, frame = render_capture.read()
             if not success:
                 break
+            if not args.no_anonymize:
+                frame = anonymize_people_heads(
+                    frame,
+                    _boxes_to_image_space(
+                        frame_player_boxes[render_frame],
+                        frame_transforms[render_frame],
+                    ),
+                )
             annotated = draw_ball_observation(
                 frame,
                 observations_by_frame.get(render_frame),

@@ -24,6 +24,11 @@ def main() -> None:
     parser.add_argument("--video", required=True, help="Bestandsnaam in videos/ of volledig pad.")
     parser.add_argument("--seconds", type=float, default=30.0, help="Aantal testseconden.")
     parser.add_argument("--corrections", type=Path, help="Optioneel JSON-bestand met reviewcorrecties.")
+    parser.add_argument(
+        "--no-anonymize",
+        action="store_true",
+        help="Schakel hoofdvervaging alleen uit voor intern diagnosewerk.",
+    )
     args = parser.parse_args()
 
     video_path = Path(args.video)
@@ -65,6 +70,7 @@ def main() -> None:
         entity_corrections=corrections,
         entity_identities=identities,
         team_roster=roster,
+        anonymize_people=not args.no_anonymize,
     )
     frames = processor.process(
         video_path=video_path,

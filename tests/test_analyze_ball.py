@@ -7,7 +7,23 @@ import unittest
 import numpy as np
 
 from football_ai.detection.ball_tracking import BallCandidate, PlayerContext
-from tools.analyze_ball import _build_tracker, _load_candidate_cache, _save_candidate_cache
+from tools.analyze_ball import (
+    _boxes_to_image_space,
+    _build_tracker,
+    _load_candidate_cache,
+    _save_candidate_cache,
+)
+
+
+def test_boxes_to_image_space_reverses_camera_transform():
+    transform = np.asarray(
+        [[1.0, 0.0, 10.0], [0.0, 1.0, 20.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+    boxes = _boxes_to_image_space(((20.0, 40.0, 50.0, 100.0),), transform)
+
+    np.testing.assert_allclose(boxes, [[10.0, 20.0, 40.0, 80.0]])
 
 
 class AnalyzeBallCandidateCacheTests(unittest.TestCase):

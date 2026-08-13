@@ -39,6 +39,7 @@ from football_ai.tracking.entity_review_manifest import (
 from football_ai.visualizer import draw_resolved_track_boxes, draw_tracked_players
 from football_ai.analysis.entity_timeline import build_entity_timeline, save_entity_timeline
 from football_ai.tracking.box_interpolation import observations_with_short_gaps
+from football_ai.privacy import anonymize_people_heads
 
 
 class VideoProcessor:
@@ -62,6 +63,7 @@ class VideoProcessor:
         entity_corrections: EntityCorrectionSet | None = None,
         entity_identities: EntityIdentitySet | None = None,
         team_roster: TeamRoster | None = None,
+        anonymize_people: bool = True,
     ) -> None:
         self.detector = detector
         self.pitch_calibration = pitch_calibration
@@ -88,6 +90,7 @@ class VideoProcessor:
         self.entity_resolver = EntityResolver(entity_corrections)
         self.entity_identities = entity_identities
         self.team_roster = team_roster
+        self.anonymize_people = bool(anonymize_people)
 
     def process(
         self,
@@ -228,8 +231,13 @@ class VideoProcessor:
                 )
 
                 if not stable_team_render:
+                    render_frame = (
+                        anonymize_people_heads(frame, player_detections.xyxy)
+                        if self.anonymize_people
+                        else frame
+                    )
                     annotated_frame = draw_tracked_players(
-                        frame=frame,
+                        frame=render_frame,
                         tracked_players=tracked_players,
                         team_by_tracker_id=team_by_tracker_id,
                         resolved_entities=resolved_entities,
@@ -460,8 +468,16 @@ class VideoProcessor:
                         current_identity_labels,
                     )
                 )
+                render_frame = (
+                    anonymize_people_heads(
+                        frame,
+                        np.asarray(list(current_boxes.values()), dtype=np.float64),
+                    )
+                    if self.anonymize_people
+                    else frame
+                )
                 annotated = draw_resolved_track_boxes(
-                    frame=frame,
+                    frame=render_frame,
                     boxes_by_tracker_id=current_boxes,
                     resolved_entities=current_entities,
                     agreement_by_tracker_id=agreements,

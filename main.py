@@ -66,6 +66,7 @@ def main() -> None:
     processor = VideoProcessor(
         detector=detector,
         pitch_calibration=calibration,
+        anonymize_people=True,
     )
 
     frames_processed = processor.process(

@@ -14,6 +14,17 @@ def test_frame_selection_is_spread_per_goal():
     assert [item["frame_number"] for item in result["frames"]] == [0, 4, 9]
 
 
+def test_frame_selection_preserves_required_reviewed_frames_within_cap():
+    people = {"video_name": "m.mp4", "records": [
+        {"goal": "A", "frame_number": i, "time_seconds": i, "candidates": [{"box": [0, 0, 1, 1], "footpoint": [1, 1]}]}
+        for i in range(10)
+    ]}
+    result = select_frame_review_candidates(people, maximum_per_goal=4, required_frame_ids=frozenset({"A:3", "A:7"}))
+    frames = [item["frame_number"] for item in result["frames"]]
+    assert len(frames) == 4
+    assert 3 in frames and 7 in frames
+
+
 def test_frame_evaluation_separates_detector_and_path_recall():
     candidates = {"frames": [
         {"frame_id": "A:1", "goal": "A", "frame_number": 1, "candidates": [{"box": [0, 0, 10, 10]}]},

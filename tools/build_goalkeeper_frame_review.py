@@ -22,7 +22,12 @@ def main() -> None:
     output = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{Path(args.video).stem}_{args.format}"
     people = json.loads((output / f"{prefix}_goal_window_people_qa.json").read_text())
-    result = select_frame_review_candidates(people, args.maximum_per_goal)
+    review_path = output / f"{prefix}_goalkeeper_frame_reviews.json"
+    required = frozenset()
+    if review_path.exists():
+        reviews = json.loads(review_path.read_text())
+        required = frozenset(item["frame_id"] for item in reviews.get("reviews", ()))
+    result = select_frame_review_candidates(people, args.maximum_per_goal, required)
     target = output / f"{prefix}_goalkeeper_frame_review_candidates.json"
     target.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"Framereview: {len(result['frames'])} frames | {target}")

@@ -27,16 +27,27 @@ def main() -> None:
     window = "Football AI - keeper recall per frame"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window, 1400, 850)
-    state = {"zoom": 1.0, "center": None, "hits": [], "clicked": None}
+    state = {"zoom": 1.0, "center": None, "hits": [], "clicked": None, "drag": None,
+             "frame_size": (1280, 720)}
 
     def mouse(event, x, y, flags, _data):
         if event == cv2.EVENT_MOUSEWHEEL:
             state["zoom"] = float(np.clip(state["zoom"] * (1.25 if flags > 0 else .8), 1, 8))
+            if state["zoom"] == 1.0:
+                state["center"] = None
         elif event == cv2.EVENT_LBUTTONDOWN and y < 700:
             for index, x1, y1, x2, y2 in state["hits"]:
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     state["clicked"] = index
                     break
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            state["drag"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and state["drag"] is not None:
+            previous_x, previous_y = state["drag"]
+            _pan_pixels(state, previous_x - x, previous_y - y)
+            state["drag"] = (x, y)
+        elif event == cv2.EVENT_RBUTTONUP:
+            state["drag"] = None
     cv2.setMouseCallback(window, mouse)
     index = next((i for i, item in enumerate(frames) if item["frame_id"] not in answers), 0)
     completed = False
@@ -47,6 +58,7 @@ def main() -> None:
             ok, frame = capture.read()
             if not ok:
                 frame = np.zeros((720, 1280, 3), np.uint8)
+            state["frame_size"] = (frame.shape[1], frame.shape[0])
             rendered, hits = _render(frame, item, state)
             state["hits"] = hits
             canvas = np.vstack((rendered, np.full((130, 1360, 3), 20, np.uint8)))
@@ -55,7 +67,7 @@ def main() -> None:
                 f"Frame {index + 1}/{len(frames)} | doel {item['goal']} | huidig: {current}",
                 "KLIK op de echte keeper (of toets 1-9) | X = zichtbaar maar NIET gedetecteerd | U = niet zichtbaar/onzeker",
                 ("ALLES BEOORDEELD | P vorige | V volgende | wijzig keuze | Esc bewaren" if completed else
-                 "P vorige | V volgende | muiswiel zoom | WASD/pijltjes bewegen | Esc bewaren"),
+                 "ZOOM: muiswiel of Z/C | PAN: rechtermuis slepen of WASD/pijltjes | 0 volledig"),
             )
             for row, text in enumerate(lines):
                 cv2.putText(canvas, text, (18, 738 + row * 34), cv2.FONT_HERSHEY_SIMPLEX, .58, (0, 230, 255) if row < 2 else (235, 235, 235), 2 if row < 2 else 1, cv2.LINE_AA)
@@ -82,13 +94,21 @@ def main() -> None:
                 index, completed = (index - 1) % len(frames), False
             elif key in (ord("v"), ord("V"), ord(".")):
                 index, completed = (index + 1) % len(frames), False
-            elif key in (2424832, 65361, 63234, ord("a"), ord("A")):
+            elif key in (ord("+"), ord("="), ord("z"), ord("Z")):
+                state["zoom"] = min(8.0, state["zoom"] * 1.25)
+            elif key in (ord("-"), ord("_"), ord("c"), ord("C")):
+                state["zoom"] = max(1.0, state["zoom"] / 1.25)
+                if state["zoom"] == 1.0:
+                    state["center"] = None
+            elif key == ord("0"):
+                state["zoom"], state["center"] = 1.0, None
+            elif key in (2424832, 65361, 63234, 81, ord("a"), ord("A")):
                 _pan(state, frame.shape, -.16, 0)
-            elif key in (2555904, 65363, 63235, ord("d"), ord("D")):
+            elif key in (2555904, 65363, 63235, 83, ord("d"), ord("D")):
                 _pan(state, frame.shape, .16, 0)
-            elif key in (2490368, 65362, 63232, ord("w"), ord("W")):
+            elif key in (2490368, 65362, 63232, 82, ord("w"), ord("W")):
                 _pan(state, frame.shape, 0, -.16)
-            elif key in (2621440, 65364, 63233, ord("s"), ord("S")):
+            elif key in (2621440, 65364, 63233, 84, ord("s"), ord("S")):
                 _pan(state, frame.shape, 0, .16)
     finally:
         capture.release()
@@ -131,6 +151,13 @@ def _pan(state, shape, dx, dy):
         float(np.clip(center_x + dx * crop_width, crop_width / 2, width - crop_width / 2)),
         float(np.clip(center_y + dy * crop_height, crop_height / 2, height - crop_height / 2)),
     )
+
+
+def _pan_pixels(state, dx, dy):
+    if state["zoom"] <= 1:
+        return
+    width, height = state["frame_size"]
+    _pan(state, (height, width, 3), dx / 1360.0, dy / 700.0)
 
 
 def _advance(index, frames, answers):

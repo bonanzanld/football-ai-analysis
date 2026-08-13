@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 
-def select_frame_review_candidates(people: dict, maximum_per_goal: int = 6) -> dict:
+def select_frame_review_candidates(
+    people: dict,
+    maximum_per_goal: int = 6,
+    required_frame_ids: frozenset[str] = frozenset(),
+) -> dict:
     if maximum_per_goal < 1:
         raise ValueError("Maximum aantal frames moet positief zijn.")
     selected = []
@@ -10,7 +14,14 @@ def select_frame_review_candidates(people: dict, maximum_per_goal: int = 6) -> d
             (item for item in people.get("records", ()) if item["goal"] == goal and item.get("candidates")),
             key=lambda item: float(item["time_seconds"]),
         )
-        indices = _spread_indices(len(records), min(maximum_per_goal, len(records)))
+        required = [index for index, item in enumerate(records) if f"{goal}:{int(item['frame_number'])}" in required_frame_ids]
+        spread = list(_spread_indices(len(records), min(maximum_per_goal, len(records))))
+        indices = list(dict.fromkeys(required + spread))
+        if len(indices) > maximum_per_goal:
+            optional = [index for index in indices if index not in required]
+            keep_optional = max(0, maximum_per_goal - len(required))
+            optional_indices = _spread_indices(len(optional), min(keep_optional, len(optional)))
+            indices = sorted(required + [optional[index] for index in optional_indices])
         for index in indices:
             record = records[index]
             selected.append({

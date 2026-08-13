@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import cv2
+import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,12 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from football_ai.analysis.entity_timeline import apply_team_roster, load_entity_timeline
+from football_ai.analysis.entity_timeline import (
+    EntityTimeline,
+    TimelineEntity,
+    apply_team_roster,
+    load_entity_timeline,
+)
 from football_ai.analysis.match_timeline import MatchTimelineEngine
 from football_ai.analysis.possession import (
     PossessionState,
@@ -25,7 +31,9 @@ from football_ai.analysis.possession import (
 )
 from football_ai.detection.ball_tracking import BallObservation
 from football_ai.visualizer import draw_ball_observation
+from football_ai.privacy import anonymize_people_heads
 from football_ai.tracking.entity_roster import load_team_roster
+from football_ai.tracking.entity_corrections import EntityRole
 from football_ai.visualization.tactical_map import (
     GoalkeeperAnchoredProjector,
     TacticalMapRenderer,
@@ -41,6 +49,14 @@ def main() -> None:
         type=float,
         default=3.75,
         help="Geschatte camerahoogte in meters voor de tijdelijke diepteweergave (standaard: 3.75).",
+    )
+    parser.add_argument(
+        "--internal-identities",
+        action="store_true",
+        help=(
+            "Gebruik intern echte spelersnamen en onvervaagd beeld. "
+            "Laat dit uit voor deelbare QA-exports."
+        ),
     )
     args = parser.parse_args()
     video_path = Path(args.video)
@@ -65,9 +81,11 @@ def main() -> None:
 
     timeline = load_entity_timeline(timeline_path)
     roster_path = entity_dir / f"{prefix}_team_roster.json"
-    if roster_path.exists():
+    if roster_path.exists() and args.internal_identities:
         timeline = apply_team_roster(timeline, load_team_roster(roster_path))
-        print(f"Spelersnamen worden toegepast: {roster_path}")
+        print(f"INTERNE EXPORT: spelersnamen en onvervaagd beeld: {roster_path}")
+    if not args.internal_identities:
+        timeline = _pseudonymize_timeline(timeline)
     entities_by_frame = {}
     for item in timeline.observations:
         entities_by_frame.setdefault(item.frame_number, []).append(item)
@@ -137,6 +155,7 @@ def main() -> None:
         turnovers,
         public_team_names,
         args.camera_height,
+        anonymize_people=not args.internal_identities,
     )
     _transcode(raw_path, output_path)
     _render_ball_tracking_only(
@@ -145,6 +164,7 @@ def main() -> None:
         observations,
         entities_by_frame,
         balls,
+        anonymize_people=not args.internal_identities,
     )
     _transcode(ball_only_raw_path, ball_only_path)
 
@@ -175,6 +195,8 @@ def _render_ball_tracking_only(
     observations,
     entities_by_frame,
     balls,
+    *,
+    anonymize_people: bool = True,
 ) -> None:
     """Render original footage with no overlays except the selected ball."""
 
@@ -195,6 +217,8 @@ def _render_ball_tracking_only(
             success, frame = capture.read()
             if not success:
                 break
+            if anonymize_people:
+                frame = _anonymize_frame(frame, entities_by_frame.get(frame_number, []))
             raw_ball = balls.get(frame_number)
             # Dit is expliciet de balltracking-only video. Iedere positie die
             # de tracker zelf levert heeft daarom voorrang, ook wanneer het
@@ -234,6 +258,8 @@ def _render(
     turnovers,
     team_names,
     camera_height_m: float,
+    *,
+    anonymize_people: bool = True,
 ) -> None:
     capture = cv2.VideoCapture(str(base_video))
     if not capture.isOpened():
@@ -262,6 +288,8 @@ def _render(
             observation = observations[frame_number]
             source_frame_size = (frame.shape[1], frame.shape[0])
             frame_entities = entities_by_frame.get(frame_number, [])
+            if anonymize_people:
+                frame = _anonymize_frame(frame, frame_entities)
             projector.update(frame_entities, source_frame_size)
             raw_ball = balls.get(frame_number)
             draw_inferred_ball = should_render_inferred_ball(observation, raw_ball)
@@ -382,6 +410,37 @@ def _render(
         team_a_path, team_b_path = heatmaps.save(output_dir, prefix, team_names)
         print(f"Heatmap {team_names.get('team_a', 'team_a')}: {team_a_path}")
         print(f"Heatmap {team_names.get('team_b', 'team_b')}: {team_b_path}")
+
+
+def _anonymize_frame(frame, entities):
+    boxes = np.asarray(
+        [item.box for item in entities],
+        dtype=np.float64,
+    ).reshape(-1, 4)
+    return anonymize_people_heads(frame, boxes)
+
+
+def _pseudonymize_timeline(timeline: EntityTimeline) -> EntityTimeline:
+    observations = tuple(
+        TimelineEntity(
+            frame_number=item.frame_number,
+            track_id=item.track_id,
+            identity_id=item.identity_id,
+            label=_pseudonymous_label(item),
+            role=item.role,
+            team=item.team,
+            box=item.box,
+            footpoint=item.footpoint,
+        )
+        for item in timeline.observations
+    )
+    return EntityTimeline(timeline.source_video, timeline.fps, observations)
+
+
+def _pseudonymous_label(item: TimelineEntity) -> str:
+    role = "Keeper" if item.role is EntityRole.GOALKEEPER else "Speler"
+    stable_id = item.identity_id if item.identity_id is not None else item.track_id
+    return f"{item.team.value} - {role} {stable_id}"
 
 
 def _team_names(*observation_groups) -> dict[str, str]:

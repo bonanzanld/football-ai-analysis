@@ -594,9 +594,11 @@ class VideoProcessor:
         return labels
 
     def _identity_display_label(self, identity: Any) -> str:
-        """Use a real name only for identities belonging to the user's team."""
+        """Keep anonymized renders pseudonymous; real names require opt-out."""
 
         if (
+            self.anonymize_people
+            or
             self.team_roster is None
             or identity is None
             or identity.team is not self.team_roster.own_team

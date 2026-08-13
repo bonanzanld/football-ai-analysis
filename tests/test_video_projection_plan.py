@@ -51,6 +51,24 @@ class VideoProjectionPlanTests(unittest.TestCase):
         self.assertEqual(gated.records[1], plan.records[1])
         self.assertEqual(gated.records[2], plan.records[2])
 
+    def test_contaminated_player_evidence_cannot_reject_projection(self) -> None:
+        matrix = self._matrix()
+        plan = VideoProjectionPlan(
+            "match.mp4",
+            "8v8",
+            0.0,
+            0.0,
+            0.5,
+            (PlannedProjection(0.0, 0, "valid", "a", matrix, "lines"),),
+        )
+
+        gated = gate_projection_plan_with_player_evidence(
+            plan,
+            {0: "contaminated_evidence"},
+        )
+
+        self.assertEqual(gated.records[0], plan.records[0])
+
 
 if __name__ == "__main__":
     unittest.main()

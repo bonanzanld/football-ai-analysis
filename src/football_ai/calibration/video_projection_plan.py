@@ -138,7 +138,14 @@ def gate_projection_plan_with_player_evidence(
     Player evidence is deliberately one-way: it may veto geometry, but it may
     never create a projection or promote a candidate to valid.
     """
-    allowed = {"unavailable", "insufficient_evidence", "ambiguous", "supportive", "rejected"}
+    allowed = {
+        "unavailable",
+        "insufficient_evidence",
+        "contaminated_evidence",
+        "ambiguous",
+        "supportive",
+        "rejected",
+    }
     unknown = set(classifications_by_frame.values()) - allowed
     if unknown:
         raise ValueError(f"Onbekende spelersclassificaties: {sorted(unknown)}")

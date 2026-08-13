@@ -109,4 +109,18 @@ def test_flags_more_than_sixteen_detected_people_without_rejecting_geometry() ->
     )
 
     assert result.exceeds_expected_player_count is True
-    assert result.classification == "supportive"
+    assert result.classification == "contaminated_evidence"
+
+
+def test_more_than_sixteen_people_cannot_reject_geometry() -> None:
+    points = tuple((100.0 + index, 80.0) for index in range(17))
+
+    result = evaluate_player_footpoints(
+        _identity_ground_projection(),
+        points,
+        pitch_length_m=64.0,
+        pitch_width_m=42.5,
+    )
+
+    assert result.acceptable_ratio == 0.0
+    assert result.classification == "contaminated_evidence"

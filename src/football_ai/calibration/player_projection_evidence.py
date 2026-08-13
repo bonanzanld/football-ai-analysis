@@ -88,10 +88,16 @@ def evaluate_player_footpoints(
 
     inside_ratio = inside / max(1, projected)
     acceptable_ratio = (inside + tolerated) / max(1, projected)
+    exceeds_expected = len(points) > maximum_expected_players
     if projected == 0:
         classification = "unavailable"
     elif projected < minimum_players:
         classification = "insufficient_evidence"
+    elif exceeds_expected:
+        # In an 8v8 frame at most sixteen players belong on the pitch. A
+        # larger detection set necessarily contains staff, substitutes,
+        # spectators or duplicate detections and must not veto geometry.
+        classification = "contaminated_evidence"
     elif severe / projected > (1.0 - minimum_acceptable_ratio) or acceptable_ratio < minimum_acceptable_ratio:
         classification = "rejected"
     elif acceptable_ratio >= 0.85:
@@ -100,7 +106,7 @@ def evaluate_player_footpoints(
         classification = "ambiguous"
     return PlayerProjectionEvidence(
         footpoint_count=len(points),
-        exceeds_expected_player_count=len(points) > maximum_expected_players,
+        exceeds_expected_player_count=exceeds_expected,
         projected_count=projected,
         inside_count=inside,
         tolerated_outside_count=tolerated,
@@ -126,7 +132,11 @@ def aggregate_player_projection_evidence(
     samples = tuple(frames)
     sufficient = tuple(
         item for item in samples
-        if item.classification not in ("unavailable", "insufficient_evidence")
+        if item.classification not in (
+            "unavailable",
+            "insufficient_evidence",
+            "contaminated_evidence",
+        )
     )
     projected = sum(item.projected_count for item in sufficient)
     acceptable = sum(item.inside_count + item.tolerated_outside_count for item in sufficient)

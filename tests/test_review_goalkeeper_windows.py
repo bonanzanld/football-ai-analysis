@@ -1,4 +1,9 @@
-from tools.review_goalkeeper_windows import _candidate_signature, _first_unanswered_index, _pan
+from tools.review_goalkeeper_windows import (
+    _advance_after_answer,
+    _candidate_signature,
+    _first_unanswered_index,
+    _pan,
+)
 
 
 def test_pan_uses_source_video_dimensions():
@@ -35,3 +40,15 @@ def test_review_starts_at_first_unanswered_candidate():
     answers = {("A", 1.0, 2.0): {"answer": "keeper"}}
 
     assert _first_unanswered_index(candidates, answers) == 1
+
+
+def test_answer_advances_to_next_unanswered_and_stays_open_when_complete():
+    candidates = [
+        {"goal": "A", "start_seconds": 1, "end_seconds": 2},
+        {"goal": "B", "start_seconds": 3, "end_seconds": 4},
+    ]
+    first = {("A", 1.0, 2.0): {"answer": "keeper"}}
+    complete = first | {("B", 3.0, 4.0): {"answer": "not_keeper"}}
+
+    assert _advance_after_answer(0, candidates, first) == (1, False)
+    assert _advance_after_answer(1, candidates, complete) == (1, True)

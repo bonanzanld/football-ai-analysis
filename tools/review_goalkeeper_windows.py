@@ -52,10 +52,11 @@ def main() -> None:
                 view["center"] = None
     cv2.setMouseCallback(window, mouse)
     index = _first_unanswered_index(candidates, answers)
+    completed_message = False
     try:
-        while index < len(candidates):
+        while candidates:
             candidate = candidates[index]
-            canvas = _render(capture, candidate, index, len(candidates), answers, view)
+            canvas = _render(capture, candidate, index, len(candidates), answers, view, completed_message)
             cv2.imshow(window, canvas)
             key = cv2.waitKeyEx(30)
             if key in (27, ord("q"), ord("Q")):
@@ -63,20 +64,22 @@ def main() -> None:
             if key in (ord("k"), ord("K"), ord("1")):
                 _answer(answers, candidate, "keeper")
                 _save(answer_path, video.name, answers)
-                index += 1
+                index, completed_message = _advance_after_answer(index, candidates, answers)
             elif key in (ord("n"), ord("N"), ord("2")):
                 _answer(answers, candidate, "not_keeper")
                 _save(answer_path, video.name, answers)
-                index += 1
+                index, completed_message = _advance_after_answer(index, candidates, answers)
             elif key in (ord("u"), ord("U"), ord("3")):
                 _answer(answers, candidate, "uncertain")
                 _save(answer_path, video.name, answers)
-                index += 1
-            elif key in (ord(","), ord("[")) and index > 0:
-                index -= 1
+                index, completed_message = _advance_after_answer(index, candidates, answers)
+            elif key in (ord(","), ord("["), ord("p"), ord("P")):
+                index = (index - 1) % len(candidates)
+                completed_message = False
                 view["zoom"], view["center"] = 1.0, None
-            elif key in (ord("."), ord("]")) and index + 1 < len(candidates):
-                index += 1
+            elif key in (ord("."), ord("]"), ord("v"), ord("V")):
+                index = (index + 1) % len(candidates)
+                completed_message = False
                 view["zoom"], view["center"] = 1.0, None
             elif key in (ord("+"), ord("=")):
                 view["zoom"] = min(8.0, view["zoom"] * 1.25)
@@ -99,7 +102,7 @@ def main() -> None:
     print(f"Keepertrajectreviews opgeslagen: {answer_path} | {len(answers)}/{len(candidates)}")
 
 
-def _render(capture, candidate, index, total, answers, view):
+def _render(capture, candidate, index, total, answers, view, completed_message=False):
     path = candidate["path"]
     samples = (path[0], path[len(path) // 2], path[-1])
     panels = []
@@ -121,8 +124,9 @@ def _render(capture, candidate, index, total, answers, view):
         f"Traject {index + 1}/{total} | Doel {candidate['goal']} | {candidate['start_seconds']:.1f}-{candidate['end_seconds']:.1f}s",
         "KIES KEEPER ALLEEN als de GELE persoon in ALLE 3 beelden de juiste keeper is.",
         "K of 1 = KEEPER    N of 2 = GEEN KEEPER    U of 3 = ONZEKER",
-        f"Huidig: {current} | zoom {view['zoom']:.1f}x | ,/. navigeren | Esc = bewaren en stoppen",
-        "Muiswiel of +/- = zoom | pijltjes of W/A/S/D = bewegen | 0 = volledig beeld",
+        f"Huidig: {current} | P = VORIGE | V = VOLGENDE | keuze wijzigen met K/N/U",
+        ("ALLES BEOORDEELD - controleer met P/V en sluit zelf af met Esc" if completed_message else
+         "Muiswiel of +/- = zoom | pijltjes of W/A/S/D = bewegen | 0 = volledig | Esc = stoppen"),
     )
     for row, text in enumerate(lines):
         cv2.putText(canvas, text, (22, 625 + row * 34), cv2.FONT_HERSHEY_SIMPLEX, .68 if row < 2 else .55, (0, 230, 255) if row < 2 else (235, 235, 235), 2 if row < 2 else 1, cv2.LINE_AA)
@@ -175,6 +179,16 @@ def _first_unanswered_index(candidates, answers):
          if (candidate["goal"], float(candidate["start_seconds"]), float(candidate["end_seconds"])) not in answers),
         0,
     )
+
+
+def _advance_after_answer(index, candidates, answers):
+    for offset in range(1, len(candidates) + 1):
+        candidate_index = (index + offset) % len(candidates)
+        candidate = candidates[candidate_index]
+        key = (candidate["goal"], float(candidate["start_seconds"]), float(candidate["end_seconds"]))
+        if key not in answers:
+            return candidate_index, False
+    return index, True
 
 
 def _save(path, video_name, answers):

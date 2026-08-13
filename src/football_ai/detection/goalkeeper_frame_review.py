@@ -74,7 +74,33 @@ def evaluate_frame_reviews(candidates: dict, reviews: dict, selected_paths: dict
             selected_correct / detected_visible if detected_visible else None
         ),
         "correct_selected_paths": selected_correct,
+        "contradicted_positive_windows": contradicted_positive_windows(candidates, reviews, selected_paths),
     }
+
+
+def contradicted_positive_windows(candidates: dict, reviews: dict, selected_paths: dict) -> list[dict]:
+    answers = {item["frame_id"]: item for item in reviews.get("reviews", ())}
+    frames = {item["frame_id"]: item for item in candidates.get("frames", ())}
+    contradicted = []
+    for window in selected_paths.get("windows", ()):
+        if window.get("quality", {}).get("classification") != "consistent_review_candidate":
+            continue
+        for item in window.get("path", ()):
+            frame_id = f"{window['goal']}:{int(item['frame_number'])}"
+            answer = answers.get(frame_id)
+            frame = frames.get(frame_id)
+            if answer is None or frame is None or answer.get("status") != "selected":
+                continue
+            human = frame["candidates"][int(answer["candidate_index"])]["box"]
+            if _box_iou(human, item["box"]) < 0.5:
+                contradicted.append({
+                    "goal": str(window["goal"]),
+                    "start_seconds": float(window["start_seconds"]),
+                    "end_seconds": float(window["end_seconds"]),
+                    "frame_number": int(item["frame_number"]),
+                })
+                break
+    return contradicted
 
 
 def _spread_indices(length: int, count: int) -> tuple[int, ...]:

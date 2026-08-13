@@ -4,6 +4,7 @@ from football_ai.calibration.camera_projection_3d import CameraProjection3D
 from football_ai.calibration.player_projection_evidence import (
     aggregate_player_projection_evidence,
     evaluate_player_footpoints,
+    temporal_player_projection_classifications,
 )
 
 
@@ -124,3 +125,33 @@ def test_more_than_sixteen_people_cannot_reject_geometry() -> None:
 
     assert result.acceptable_ratio == 0.0
     assert result.classification == "contaminated_evidence"
+
+
+def test_temporal_rejection_requires_three_clean_nearby_frames() -> None:
+    rejected = evaluate_player_footpoints(
+        _identity_ground_projection(),
+        ((10, 10), (70, 10), (75, 20)),
+        pitch_length_m=64.0,
+        pitch_width_m=42.5,
+    )
+    contaminated = evaluate_player_footpoints(
+        _identity_ground_projection(),
+        tuple((100.0 + index, 80.0) for index in range(17)),
+        pitch_length_m=64.0,
+        pitch_width_m=42.5,
+    )
+
+    two_frames = temporal_player_projection_classifications(
+        ((0, rejected), (5, rejected), (7, contaminated)),
+        window_radius_frames=10,
+        minimum_total_players=6,
+    )
+    three_frames = temporal_player_projection_classifications(
+        ((0, rejected), (5, rejected), (9, rejected), (10, contaminated)),
+        window_radius_frames=10,
+        minimum_total_players=6,
+    )
+
+    assert set(two_frames.values()) == {"insufficient_evidence"}
+    assert three_frames[5] == "rejected"
+    assert three_frames[10] == "rejected"

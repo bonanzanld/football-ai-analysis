@@ -16,7 +16,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from football_ai.calibration.bootstrap.detection_profile import create_detection_profile
-from football_ai.calibration.player_projection_evidence import evaluate_player_footpoints
+from football_ai.calibration.player_projection_evidence import (
+    PlayerProjectionEvidence,
+    evaluate_player_footpoints,
+    temporal_player_projection_classifications,
+)
 from football_ai.calibration.video_projection_plan import (
     gate_projection_plan_with_player_evidence,
     load_video_projection_plan,
@@ -143,6 +147,36 @@ def main() -> None:
             )
     finally:
         capture.release()
+
+    sampled_frame_step = (
+        abs(int(records[1]["frame_number"]) - int(records[0]["frame_number"]))
+        if len(records) > 1
+        else 1
+    )
+    temporal_classifications = temporal_player_projection_classifications(
+        (
+            (
+                int(item["frame_number"]),
+                PlayerProjectionEvidence(
+                    **{
+                        key: item[key]
+                        for key in PlayerProjectionEvidence.__dataclass_fields__
+                    }
+                ),
+            )
+            for item in records
+        ),
+        window_radius_frames=max(
+            1,
+            int(round(
+                sampled_frame_step * 3.0 / (plan.interval_seconds * args.stride)
+            )),
+        ),
+        minimum_acceptable_ratio=args.minimum_player_containment,
+    )
+    for item in records:
+        item["raw_classification"] = item["classification"]
+        item["classification"] = temporal_classifications[int(item["frame_number"])]
 
     by_status = {}
     for status in sorted({item["plan_status"] for item in records}):

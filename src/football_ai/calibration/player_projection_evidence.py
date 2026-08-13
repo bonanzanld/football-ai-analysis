@@ -29,6 +29,33 @@ class PlayerProjectionSequenceEvidence:
     classification: str
 
 
+def temporal_player_projection_classifications(
+    frame_evidence: Iterable[tuple[int, PlayerProjectionEvidence]],
+    *,
+    window_radius_frames: int,
+    minimum_acceptable_ratio: float = 0.60,
+    minimum_frames: int = 3,
+    minimum_total_players: int = 15,
+) -> dict[int, str]:
+    """Require nearby clean frames before player evidence may veto geometry."""
+    if window_radius_frames < 0:
+        raise ValueError("Window radius cannot be negative")
+    samples = tuple(sorted(frame_evidence, key=lambda item: item[0]))
+    return {
+        frame_number: aggregate_player_projection_evidence(
+            (
+                evidence
+                for other_frame, evidence in samples
+                if abs(other_frame - frame_number) <= window_radius_frames
+            ),
+            minimum_acceptable_ratio=minimum_acceptable_ratio,
+            minimum_frames=minimum_frames,
+            minimum_total_players=minimum_total_players,
+        ).classification
+        for frame_number, _evidence in samples
+    }
+
+
 def evaluate_player_footpoints(
     projection: CameraProjection3D | None,
     footpoints: Iterable[tuple[float, float]],

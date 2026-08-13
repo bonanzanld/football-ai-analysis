@@ -51,7 +51,7 @@ def main() -> None:
             if view["zoom"] == 1.0:
                 view["center"] = None
     cv2.setMouseCallback(window, mouse)
-    index = 0
+    index = _first_unanswered_index(candidates, answers)
     try:
         while index < len(candidates):
             candidate = candidates[index]
@@ -166,6 +166,14 @@ def _candidate_signature(candidate):
     return "|".join(
         f"{int(item['frame_number'])}:" + ",".join(f"{float(value):.2f}" for value in item["box"])
         for item in samples
+    )
+
+
+def _first_unanswered_index(candidates, answers):
+    return next(
+        (position for position, candidate in enumerate(candidates)
+         if (candidate["goal"], float(candidate["start_seconds"]), float(candidate["end_seconds"])) not in answers),
+        0,
     )
 
 

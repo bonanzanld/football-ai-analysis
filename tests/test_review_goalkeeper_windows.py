@@ -1,4 +1,4 @@
-from tools.review_goalkeeper_windows import _candidate_signature, _pan
+from tools.review_goalkeeper_windows import _candidate_signature, _first_unanswered_index, _pan
 
 
 def test_pan_uses_source_video_dimensions():
@@ -25,3 +25,13 @@ def test_candidate_signature_covers_exact_three_displayed_boxes():
     assert _candidate_signature(candidate) == (
         "0:0.00,2.00,3.00,4.00|3:3.00,2.00,3.00,4.00|6:6.00,2.00,3.00,4.00"
     )
+
+
+def test_review_starts_at_first_unanswered_candidate():
+    candidates = [
+        {"goal": "A", "start_seconds": 1, "end_seconds": 2},
+        {"goal": "B", "start_seconds": 3, "end_seconds": 4},
+    ]
+    answers = {("A", 1.0, 2.0): {"answer": "keeper"}}
+
+    assert _first_unanswered_index(candidates, answers) == 1

@@ -52,9 +52,11 @@ def main() -> None:
             canvas = cv2.resize(_crop(frame, view), (1360, 700))
             canvas = np.vstack((canvas, np.full((130, 1360, 3), 20, np.uint8)))
             current = answers.get(item["candidate_id"], {}).get("answer", "nog niet beoordeeld")
+            competitor = item.get("selection_reason") == "highest_goal_proximity_non_keeper_path_competitor"
             lines = (
                 f"Vak {index + 1}/{len(candidates)} | Doel {item['goal']} | frame {item['frame_number']} | huidig: {current}",
-                "Is alleen de GELE persoon in DIT beeld de keeper? K/1 = JA | N/2 = NEE | U/3 = ONZEKER",
+                ("GELE PERSOON IS EEN CONCURRENT, NIET DE VOORSPELDE KEEPER. Is deze persoon toch keeper? K/N/U" if competitor else
+                 "Is alleen de GELE persoon in DIT beeld de keeper? K/1 = JA | N/2 = NEE | U/3 = ONZEKER"),
                 ("ALLES BEOORDEELD | P = VORIGE | V = VOLGENDE | wijzig met K/N/U | Esc bewaren" if completed_message else
                  "P = VORIGE | V = VOLGENDE | muiswiel of +/- zoom | pijltjes/WASD bewegen | Esc bewaren"),
             )

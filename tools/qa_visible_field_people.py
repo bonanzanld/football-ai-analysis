@@ -16,9 +16,14 @@ from football_ai.calibration.bootstrap.local_mask_tracker import LocalMaskTracke
 from football_ai.calibration.bootstrap.visible_field_mask import build_visible_field_mask
 from football_ai.calibration.field_zone import FieldZone
 from football_ai.detector import FootballDetector
+from football_ai.privacy import anonymize_people_heads
 
 
 COLORS = {FieldZone.INSIDE: (40, 210, 40), FieldZone.EDGE: (0, 165, 255), FieldZone.OUTSIDE: (40, 40, 230)}
+
+
+def _anonymize_detected_people(frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+    return anonymize_people_heads(frame, boxes)
 
 
 def main() -> None:
@@ -59,9 +64,10 @@ def main() -> None:
                 else:
                     fallback_frames += 1
                     tracking_label = "tracking HOLD"
+            _all, people, _balls = detector.detect(frame)
+            frame = _anonymize_detected_people(frame, people.xyxy)
             points = np.round(polygon).astype(np.int32)
             cv2.polylines(frame, [points], True, (0, 255, 255), 3, cv2.LINE_AA)
-            _all, people, _balls = detector.detect(frame)
             for box, confidence in zip(people.xyxy, people.confidence):
                 x1, y1, x2, y2 = box.astype(float)
                 foot = ((x1 + x2) / 2.0, y2)

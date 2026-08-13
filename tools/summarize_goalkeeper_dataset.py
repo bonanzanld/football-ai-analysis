@@ -15,7 +15,7 @@ from football_ai.detection.goalkeeper_dataset import summarize_goalkeeper_manife
 
 def main() -> None:
     root = PROJECT_ROOT / "data" / "goalkeeper_ground_truth"
-    manifests = tuple(sorted(root.glob("*_window_examples.json")))
+    manifests = tuple(sorted((*root.glob("*_window_examples.json"), *root.glob("*_box_examples.json"))))
     result = summarize_goalkeeper_manifests(manifests)
     target = root / "summary.json"
     target.write_text(json.dumps(result, indent=2), encoding="utf-8")

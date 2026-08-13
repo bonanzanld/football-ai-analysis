@@ -30,18 +30,19 @@ def test_exports_only_three_displayed_positive_boxes_and_no_ambiguous_negatives(
 def test_summary_preserves_video_level_split_boundary():
     with TemporaryDirectory() as directory:
         paths = []
-        for video, count in (("a.mp4", 3), ("b.mov", 6)):
-            path = Path(directory) / f"{video}.json"
+        for index, (video, labels) in enumerate((("a.mp4", ["goalkeeper"] * 3), ("b.mov", ["keeper", "not_keeper"]))):
+            path = Path(directory) / f"{index}.json"
             path.write_text(json.dumps({
                 "video_name": video,
                 "human_reviewed": True,
-                "examples": [{"label": "goalkeeper"}] * count,
+                "examples": [{"label": label} for label in labels],
             }), encoding="utf-8")
             paths.append(path)
 
         result = summarize_goalkeeper_manifests(tuple(paths))
 
-    assert result["positive_examples"] == 9
+    assert result["positive_examples"] == 4
+    assert result["negative_examples"] == 1
     assert result["source_video_count"] == 2
-    assert [item["example_count"] for item in result["sources"]] == [3, 6]
+    assert [item["example_count"] for item in result["sources"]] == [3, 2]
     assert "entire source videos" in result["split_policy"]

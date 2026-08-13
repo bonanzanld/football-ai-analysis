@@ -24,7 +24,7 @@ def main() -> None:
     )["examples"]
     answer_path = output / f"{prefix}_goalkeeper_box_reviews.json"
     previous = json.loads(answer_path.read_text()) if answer_path.exists() else {"reviews": []}
-    answers = {item["candidate_id"]: item for item in previous.get("reviews", ())}
+    answers = _current_answers(candidates, previous)
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
         raise FileNotFoundError(video)
@@ -139,6 +139,14 @@ def _advance_box_review(index, candidates, answers):
         if candidates[candidate_index]["candidate_id"] not in answers:
             return candidate_index, False
     return index, True
+
+
+def _current_answers(candidates, previous):
+    candidate_ids = {item["candidate_id"] for item in candidates}
+    return {
+        item["candidate_id"]: item for item in previous.get("reviews", ())
+        if item["candidate_id"] in candidate_ids
+    }
 
 
 if __name__ == "__main__":

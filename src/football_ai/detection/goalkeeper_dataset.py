@@ -42,33 +42,39 @@ def build_goalkeeper_window_dataset(resolved_path: Path) -> dict:
 def summarize_goalkeeper_manifests(manifest_paths: tuple[Path, ...]) -> dict:
     """Combine metadata while preserving video-level evaluation boundaries."""
     sources = []
-    total = 0
+    positive_total = 0
+    negative_total = 0
     for path in manifest_paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not payload.get("human_reviewed", False):
             raise ValueError(f"Keepermanifest is niet menselijk beoordeeld: {path}")
         examples = tuple(payload.get("examples", ()))
-        if any(item.get("label") != "goalkeeper" for item in examples):
-            raise ValueError(f"Onverwacht niet-positief keeperlabel: {path}")
-        total += len(examples)
+        labels = [item.get("label") for item in examples]
+        if any(label not in {"goalkeeper", "keeper", "not_keeper"} for label in labels):
+            raise ValueError(f"Onbekend keeperlabel: {path}")
+        positive = sum(label in {"goalkeeper", "keeper"} for label in labels)
+        negative = sum(label == "not_keeper" for label in labels)
+        positive_total += positive
+        negative_total += negative
         sources.append({
             "video_name": str(payload["video_name"]),
             "example_count": len(examples),
+            "positive_examples": positive,
+            "negative_examples": negative,
             "manifest": str(path),
         })
-    video_names = [item["video_name"] for item in sources]
-    if len(video_names) != len(set(video_names)):
-        raise ValueError("Elke bronvideo mag maar eenmaal voorkomen.")
+    video_names = sorted({item["video_name"] for item in sources})
     return {
         "schema_version": 1,
         "human_reviewed": True,
-        "positive_examples": total,
-        "negative_examples": 0,
-        "source_video_count": len(sources),
+        "positive_examples": positive_total,
+        "negative_examples": negative_total,
+        "source_video_count": len(video_names),
+        "manifest_count": len(sources),
         "sources": sources,
         "split_policy": "keep entire source videos together; never split frames from one video across train and validation",
         "limitations": [
-            "positive-only data cannot measure precision or train a binary classifier",
             "selection-conditioned examples do not measure missed goalkeeper windows",
+            "binary modelling requires positive and negative examples from multiple source videos",
         ],
     }

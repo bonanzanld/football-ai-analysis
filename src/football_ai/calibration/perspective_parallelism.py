@@ -22,6 +22,60 @@ class ParallelBoundaryQuality:
         }
 
 
+def sideline_rays_from_confirmed_endline(
+    rear_corner: tuple[float, float],
+    front_corner: tuple[float, float],
+    direction_vanishing_point: tuple[float, float],
+) -> tuple[
+    tuple[tuple[float, float], tuple[float, float]],
+    tuple[tuple[float, float], tuple[float, float]],
+]:
+    """Create the only two certain sidelines from one confirmed 8v8 end line.
+
+    The opposite end line is intentionally not inferred: parallel direction
+    fixes two projective rays but does not determine the pitch length in image.
+    """
+    corners = np.asarray((rear_corner, front_corner), dtype=np.float64)
+    vanishing = np.asarray(direction_vanishing_point, dtype=np.float64)
+    if corners.shape != (2, 2) or vanishing.shape != (2,):
+        raise ValueError("Two end-line corners and one vanishing point are required")
+    if not np.all(np.isfinite(corners)) or not np.all(np.isfinite(vanishing)):
+        raise ValueError("Sideline ray geometry must be finite")
+    if np.linalg.norm(corners[0] - corners[1]) < 2.0:
+        raise ValueError("Confirmed end-line corners must be distinct")
+    if any(np.linalg.norm(corner - vanishing) < 2.0 for corner in corners):
+        raise ValueError("Vanishing point must differ from both end-line corners")
+    point = tuple(map(float, vanishing))
+    return (
+        (tuple(map(float, corners[0])), point),
+        (tuple(map(float, corners[1])), point),
+    )
+
+
+def sideline_support_deviation_degrees(
+    corner: tuple[float, float],
+    direction_vanishing_point: tuple[float, float],
+    support: tuple[float, float],
+    *,
+    away_from_vanishing: bool,
+) -> float:
+    """Measure cone support without allowing it to rotate official geometry."""
+    corner_v = np.asarray(corner, dtype=np.float64)
+    official = np.asarray(direction_vanishing_point, dtype=np.float64) - corner_v
+    if away_from_vanishing:
+        official *= -1.0
+    observed = np.asarray(support, dtype=np.float64) - corner_v
+    if np.linalg.norm(official) < 2.0 or np.linalg.norm(observed) < 25.0:
+        raise ValueError("Sideline direction and support must be separated from the corner")
+    official_angle = float(np.arctan2(official[1], official[0]))
+    observed_angle = float(np.arctan2(observed[1], observed[0]))
+    difference = float(np.arctan2(
+        np.sin(observed_angle - official_angle),
+        np.cos(observed_angle - official_angle),
+    ))
+    return abs(float(np.degrees(difference)))
+
+
 def measure_ground_line_angle(
     first_line: tuple[tuple[float, float], tuple[float, float]],
     second_line: tuple[tuple[float, float], tuple[float, float]],

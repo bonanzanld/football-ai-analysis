@@ -8,10 +8,33 @@ from football_ai.calibration.perspective_parallelism import (
     assess_playable_sideline_parallelism,
     estimate_vanishing_point_from_lines,
     rebuild_from_endline_goal_area_and_far_support,
+    sideline_rays_from_confirmed_endline,
+    sideline_support_deviation_degrees,
 )
 
 
 class PerspectiveParallelismTests(unittest.TestCase):
+    def test_confirmed_endline_creates_two_rays_but_no_opposite_endline(self) -> None:
+        rays = sideline_rays_from_confirmed_endline(
+            (800.0, 300.0),
+            (400.0, 260.0),
+            (-500.0, 200.0),
+        )
+
+        self.assertEqual(rays[0], ((800.0, 300.0), (-500.0, 200.0)))
+        self.assertEqual(rays[1], ((400.0, 260.0), (-500.0, 200.0)))
+        self.assertEqual(len(rays), 2)
+
+    def test_cone_support_only_measures_deviation_from_official_direction(self) -> None:
+        observed = sideline_support_deviation_degrees(
+            (100.0, 100.0),
+            (200.0, 100.0),
+            (0.0, 120.0),
+            away_from_vanishing=True,
+        )
+
+        self.assertGreater(observed, 5.0)
+        self.assertAlmostEqual(observed, 11.309932474)
     def test_estimates_common_vanishing_point(self) -> None:
         point = estimate_vanishing_point_from_lines(
             (((0.0, 100.0), (500.0, 50.0)), ((0.0, 300.0), (500.0, 150.0)))

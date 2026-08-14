@@ -16,7 +16,7 @@ class EndLineCollector:
     PANEL = 480
     WIDTH, HEIGHT = 1700, 900
 
-    def __init__(self, video: Path, start: float, minimum: float, maximum: float, side: str) -> None:
+    def __init__(self, video: Path, start: float, minimum: float, maximum: float, side: str, corners: bool = False, sideline_supports: bool = False, reference_corners: tuple[tuple[float, float], ...] = ()) -> None:
         self.video = video
         self.capture = cv2.VideoCapture(str(video))
         if not self.capture.isOpened():
@@ -24,6 +24,12 @@ class EndLineCollector:
         self.fps = float(self.capture.get(cv2.CAP_PROP_FPS))
         self.minimum, self.maximum = minimum, maximum
         self.side = side
+        self.corners = bool(corners)
+        self.sideline_supports = bool(sideline_supports)
+        if self.corners and self.sideline_supports:
+            raise ValueError("Kies hoekpunten of zijlijnsteun, niet beide.")
+        self.required_points = 2 if self.corners or self.sideline_supports else 3
+        self.reference_corners = tuple(reference_corners)
         self.time = float(np.clip(start, minimum, maximum))
         self.frame = self._read()
         self.points: list[tuple[float, float]] = []
@@ -70,12 +76,36 @@ class EndLineCollector:
                     self._pan(0.0, -0.16)
                 elif key in (2621440, 65364, 63233, 84, ord("s"), ord("S")):
                     self._pan(0.0, 0.16)
-                elif key in (10, 13) and len(self.points) == 3:
+                elif key in (10, 13) and len(self.points) == self.required_points:
                     self.done = True
         finally:
             self.capture.release()
             cv2.destroyWindow(self.WINDOW)
         values = np.asarray(self.points)
+        if self.corners:
+            return {
+                "schema_version": 1,
+                "video_name": self.video.name,
+                "frame_number": int(round(self.time * self.fps)),
+                "time_seconds": self.time,
+                "role": f"8v8_{self.side}_end_line_corners",
+                "field_x_m": 0.0 if self.side == "left" else 64.0,
+                "rear_corner": values[0].tolist(),
+                "front_corner": values[1].tolist(),
+                "provenance": "human_reviewed",
+            }
+        if self.sideline_supports:
+            return {
+                "schema_version": 1,
+                "video_name": self.video.name,
+                "frame_number": int(round(self.time * self.fps)),
+                "time_seconds": self.time,
+                "role": f"8v8_{self.side}_sideline_supports",
+                "field_x_m": 0.0 if self.side == "left" else 64.0,
+                "rear_sideline_support": values[0].tolist(),
+                "front_sideline_support": values[1].tolist(),
+                "provenance": "human_reviewed",
+            }
         center = values.mean(axis=0)
         _u, _s, vh = np.linalg.svd(values - center)
         normal = np.asarray((-vh[0, 1], vh[0, 0]))
@@ -120,12 +150,18 @@ class EndLineCollector:
         if event == cv2.EVENT_MOUSEWHEEL:
             self.zoom = min(8.0, self.zoom * 1.25) if flags > 0 else max(1.0, self.zoom / 1.25)
             return
-        if event != cv2.EVENT_LBUTTONDOWN or len(self.points) >= 3:
+        if event != cv2.EVENT_LBUTTONDOWN or len(self.points) >= self.required_points:
             return
         x0, y0, scale, ox, oy = self.mapping
         point = (x0 + (x - ox) / scale, y0 + (y - oy) / scale)
         h, w = self.frame.shape[:2]
         if 0 <= point[0] < w and 0 <= point[1] < h:
+            if self.sideline_supports and any(
+                np.linalg.norm(np.subtract(point, corner)) < 25.0
+                for corner in self.reference_corners
+            ):
+                self.status = "Dit is een hoekpunt. Klik een VOLGEND hoedje verder de zijlijn op."
+                return
             self.points.append(point)
 
     def _render(self):
@@ -139,8 +175,32 @@ class EndLineCollector:
         for point in self.points:
             p = (round(ox + (point[0] - x0) * scale), round(oy + (point[1] - y0) * scale))
             cv2.circle(canvas, p, 8, (255, 0, 255), -1)
+        for point in self.reference_corners:
+            p = (round(ox + (point[0] - x0) * scale), round(oy + (point[1] - y0) * scale))
+            cv2.circle(canvas, p, 12, (0, 140, 255), 4, cv2.LINE_AA)
         side_label = "LINKER" if self.side == "left" else "RECHTER"
-        lines = (f"{side_label} 8v8-ACHTERLIJN", "", "Klik 3 verspreide punten op", f"DEZELFDE {side_label} achterlijn die", "haaks op de 8v8-zijlijnen staat.", "", "Gebruik betrouwbare hoedjes of", "zichtbare punten op die lijn.", "Geen 11v11-middenlijn klikken.", "", f"Tijd: {self.time:.1f}s", f"Punten: {len(self.points)}/3", "", ",/. ander moment", "Muiswiel of +/- zoom", "Pijltjes of W/A/S/D bewegen", "U ongedaan | Enter opslaan", "Esc afbreken")
+        if self.corners:
+            instructions = (
+                "Klik exact de TWEE hoekhoedjes:",
+                "1. achterste hoek van de achterlijn",
+                "2. voorste hoek van de achterlijn",
+                "Niet zomaar punten op de lijn klikken.",
+            )
+        elif self.sideline_supports:
+            instructions = (
+                "Klik exact TWEE volgende hoedjes:",
+                "1. op de ACHTERSTE zijlijn",
+                "2. op de VOORSTE zijlijn",
+                "Kies per lijn een hoedje vanaf de hoek het veld in.",
+            )
+        else:
+            instructions = (
+                "Klik 3 verspreide punten op",
+                f"DEZELFDE {side_label} achterlijn die",
+                "haaks op de 8v8-zijlijnen staat.",
+                "Gebruik betrouwbare hoedjes of zichtbare lijnpunten.",
+            )
+        lines = (f"{side_label} 8v8-ACHTERLIJN", "", *instructions, "", "Geen 11v11-middenlijn klikken.", "", f"Tijd: {self.time:.1f}s", f"Punten: {len(self.points)}/{self.required_points}", "", ",/. ander moment", "Muiswiel of +/- zoom", "Pijltjes of W/A/S/D bewegen", "U ongedaan | Enter opslaan", "Esc afbreken")
         for i, line in enumerate(lines):
             cv2.putText(canvas, line, (18, 35 + i * 34), cv2.FONT_HERSHEY_SIMPLEX, .55, (0, 230, 255) if i in (0, 2) else (235, 235, 235), 1 if i else 2, cv2.LINE_AA)
         return canvas
@@ -150,13 +210,40 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", required=True); parser.add_argument("--format", default="8v8")
     parser.add_argument("--side", choices=("left", "right"), required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--corners", action="store_true", help="Klik de twee echte hoekhoedjes in plaats van drie lijnpunten.")
+    mode.add_argument("--sideline-supports", action="store_true", help="Klik een extra hoedje op beide zijlijnen.")
     parser.add_argument("--start", type=float, default=969.5); parser.add_argument("--minimum", type=float, default=951.0); parser.add_argument("--maximum", type=float, default=997.5)
     args = parser.parse_args()
     video = PROJECT_ROOT / "videos" / args.video
-    result = EndLineCollector(video, args.start, args.minimum, args.maximum, args.side).run()
-    output = PROJECT_ROOT / "output" / "pitch_bootstrap" / f"{video.stem}_{args.format}_manual_8v8_{args.side}_endline.json"
+    reference_corners = ()
+    if args.sideline_supports:
+        corner_path = (
+            PROJECT_ROOT / "output" / "pitch_bootstrap"
+            / f"{video.stem}_{args.format}_manual_8v8_{args.side}_endline_corners.json"
+        )
+        corner_data = json.loads(corner_path.read_text(encoding="utf-8"))
+        reference_corners = (
+            tuple(corner_data["rear_corner"]),
+            tuple(corner_data["front_corner"]),
+        )
+    result = EndLineCollector(
+        video, args.start, args.minimum, args.maximum, args.side,
+        args.corners, args.sideline_supports, reference_corners,
+    ).run()
+    suffix = (
+        "sideline_supports" if args.sideline_supports
+        else "endline_corners" if args.corners
+        else "endline"
+    )
+    output = PROJECT_ROOT / "output" / "pitch_bootstrap" / f"{video.stem}_{args.format}_manual_8v8_{args.side}_{suffix}.json"
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(f"8v8-achterlijn opgeslagen: {output} | RMS {result['rms_error_px']:.2f}px")
+    detail = (
+        "2 menselijke zijlijnsteunpunten" if args.sideline_supports
+        else "2 menselijke hoekpunten" if args.corners
+        else f"RMS {result['rms_error_px']:.2f}px"
+    )
+    print(f"8v8-achterlijn opgeslagen: {output} | {detail}")
 
 
 if __name__ == "__main__":

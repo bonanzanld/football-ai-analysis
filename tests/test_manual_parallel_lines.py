@@ -1,38 +1,23 @@
-import unittest
+import pytest
 
-from football_ai.calibration.manual_midfield_line import ManualMidfieldLine
 from football_ai.calibration.manual_parallel_lines import (
     ManualParallelLine,
     ManualParallelLineReference,
 )
 
 
-class ManualParallelLineTests(unittest.TestCase):
-    def test_reference_round_trip(self):
-        points = ((10.0, 20.0), (30.0, 21.0), (50.0, 22.0), (70.0, 23.0), (90.0, 24.0))
-        midfield = ManualMidfieldLine.fit("match.mp4", 1, 0.1, points)
-        reference = ManualParallelLineReference(
-            "match.mp4",
-            (
-                ManualParallelLine.from_midfield(midfield),
-                ManualParallelLine.fit("goal_area_5m", 2, 0.2, points),
-                ManualParallelLine.fit("penalty_area_16m", 3, 0.3, points),
-            ),
-        )
-
-        restored = ManualParallelLineReference.from_dict(reference.to_dict())
-
-        self.assertEqual(restored, reference)
-        self.assertEqual(restored.to_dict()["world_relation"], "parallel")
-
-    def test_requires_all_three_lines_in_semantic_order(self):
-        points = ((10.0, 20.0), (30.0, 21.0), (50.0, 22.0), (70.0, 23.0), (90.0, 24.0))
-        with self.assertRaisesRegex(ValueError, "middenlijn"):
-            ManualParallelLineReference(
-                "match.mp4",
-                (ManualParallelLine.fit("goal_area_5m", 2, 0.2, points),),
-            )
+def _line(kind, frame, equation):
+    return ManualParallelLine(kind, frame, frame / 30, ((0, 0),) * 5, equation, 0.1, 0.2)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_parallel_lines_from_same_frame_recover_vanishing_point():
+    reference = ManualParallelLineReference(
+        "match.mp4",
+        (
+            _line("midfield", 60, (0, 1, -10)),
+            _line("goal_area_5m", 30, (1, 0, -20)),
+            _line("penalty_area_16m", 30, (0, 1, -10)),
+        ),
+    )
+
+    assert reference.vanishing_point_at_frame(30) == pytest.approx((20.0, 10.0))

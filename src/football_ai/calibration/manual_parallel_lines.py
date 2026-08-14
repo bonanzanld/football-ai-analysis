@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
+import numpy as np
+
 from football_ai.calibration.manual_midfield_line import ManualMidfieldLine
 
 
@@ -99,6 +101,18 @@ class ManualParallelLineReference:
             "direction_role": "parallel_to_8v8_sidelines",
             "lines": [line.to_dict() for line in self.lines],
         }
+
+    def vanishing_point_at_frame(self, frame_number: int) -> tuple[float, float]:
+        lines = tuple(item for item in self.lines if item.frame_number == frame_number)
+        if len(lines) < 2:
+            raise ValueError("Minimaal twee parallelle lijnen uit hetzelfde frame vereist.")
+        equations = np.asarray([item.equation for item in lines], dtype=np.float64)
+        _u, _s, vh = np.linalg.svd(equations)
+        point = vh[-1]
+        if abs(float(point[2])) < 1e-9:
+            raise ValueError("Parallelle 11v11-lijnen leveren geen eindig verdwijnpunt.")
+        point /= point[2]
+        return float(point[0]), float(point[1])
 
     @classmethod
     def from_dict(cls, data: dict) -> "ManualParallelLineReference":

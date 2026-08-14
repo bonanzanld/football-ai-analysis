@@ -17,7 +17,11 @@ if str(SRC) not in sys.path:
 
 from football_ai.calibration.bootstrap.detection_profile import create_detection_profile
 from football_ai.calibration.camera_projection_3d import CameraProjection3D
-from football_ai.calibration.player_projection_evidence import evaluate_player_footpoints
+from football_ai.calibration.player_projection_evidence import (
+    PlayerProjectionEvidence,
+    aggregate_player_projection_evidence,
+    evaluate_player_footpoints,
+)
 from football_ai.detector import FootballDetector
 from football_ai.filtering.player_filter import PlayerFilter
 
@@ -45,6 +49,7 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--player-threshold", type=float, default=0.20)
     parser.add_argument("--minimum-player-containment", type=float, default=0.60)
+    parser.add_argument("--preview", type=Path)
     args = parser.parse_args()
     report = json.loads(args.atlas_report.read_text(encoding="utf-8"))
     profile = create_detection_profile(args.format)
@@ -57,6 +62,7 @@ def main() -> None:
     if not capture.isOpened():
         raise RuntimeError(f"Cannot open video: {args.video}")
     records = []
+    previews = []
     try:
         samples = report["records"][::args.stride]
         for index, item in enumerate(samples, start=1):
@@ -81,18 +87,72 @@ def main() -> None:
             records.append({
                 "frame_number": item["frame_number"], "time_seconds": item["time_seconds"],
                 "atlas_status": item["status"], **asdict(evidence),
+                "boxes": [list(map(float, box)) for box in people.xyxy],
+                "footpoints": [list(point) for point in footpoints],
             })
+            preview_step = max(len(samples) // 6, 1)
+            if args.preview is not None and (
+                index == 1 or index == len(samples) or (index - 1) % preview_step == 0
+            ):
+                projection = _projection(item.get("ground_homography"))
+                annotated = frame.copy()
+                for box, point in zip(people.xyxy, footpoints):
+                    color = (0, 180, 255)
+                    label = "onbekend"
+                    if projection is not None:
+                        try:
+                            x, y = projection.image_to_ground(point)
+                            inside = (
+                                0.0 <= x <= profile.pitch_length_m
+                                and 0.0 <= y <= profile.pitch_width_m
+                            )
+                            color = (0, 220, 0) if inside else (0, 0, 255)
+                            label = f"{x:.0f},{y:.0f}"
+                        except ValueError:
+                            pass
+                    x1, y1, x2, y2 = np.rint(box).astype(int)
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                    cv2.circle(annotated, tuple(np.rint(point).astype(int)), 5, color, -1)
+                    cv2.putText(
+                        annotated, label, (x1, max(18, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1, cv2.LINE_AA,
+                    )
+                cv2.putText(
+                    annotated, f"{item['time_seconds']:.1f}s | {len(footpoints)} personen",
+                    (18, 34), cv2.FONT_HERSHEY_SIMPLEX, .8,
+                    (255, 255, 255), 2, cv2.LINE_AA,
+                )
+                previews.append(cv2.resize(annotated, (640, 360)))
             print(f"{index}/{len(samples)} frame {item['frame_number']}: {len(footpoints)} players, {evidence.classification}")
     finally:
         capture.release()
     summary = dict(Counter(item["classification"] for item in records))
+    aggregate = aggregate_player_projection_evidence(
+        (
+            PlayerProjectionEvidence(**{
+                key: item[key] for key in PlayerProjectionEvidence.__dataclass_fields__
+            })
+            for item in records
+        ),
+        minimum_acceptable_ratio=args.minimum_player_containment,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "schema_version": 1, "diagnostic_only": True,
         "minimum_player_containment": args.minimum_player_containment,
-        "summary": summary, "records": records,
+        "summary": summary, "clean_sequence": asdict(aggregate), "records": records,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
+    if args.preview is not None and previews:
+        rows = []
+        for index in range(0, len(previews), 3):
+            row = previews[index:index + 3]
+            while len(row) < 3:
+                row.append(np.zeros((360, 640, 3), dtype=np.uint8))
+            rows.append(np.hstack(row))
+        args.preview.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(args.preview), np.vstack(rows))
     print(f"Samenvatting: {summary}")
+    print(f"Schone reeks: {aggregate.classification}, {aggregate.acceptable_ratio:.1%} acceptabel")
     print(f"Rapport: {args.output}")
 
 

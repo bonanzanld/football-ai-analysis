@@ -209,6 +209,10 @@ def main() -> None:
                 "frame_number": frame_number,
                 "status": status,
                 "patch_id": projection.patch_id,
+                "ground_homography": (
+                    None if projection.ground_to_frame is None
+                    else np.asarray(projection.ground_to_frame, dtype=float).tolist()
+                ),
                 "inliers": projection.inliers,
                 "inlier_ratio": projection.inlier_ratio,
                 "coverage": projection.coverage,

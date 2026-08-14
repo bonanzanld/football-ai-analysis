@@ -16,6 +16,8 @@ if str(SRC) not in sys.path:
 
 from football_ai.calibration.bootstrap.detection_profile import create_detection_profile
 from football_ai.calibration.video_projection_plan import load_video_projection_plan
+from football_ai.detector import FootballDetector
+from football_ai.filtering.player_filter import PlayerFilter
 
 
 def _evenly_spaced(records: list[dict], count: int) -> list[dict]:
@@ -48,6 +50,37 @@ def _draw_field(frame: np.ndarray, projection, length: float, width: float) -> N
     for index, point in enumerate(boundary, start=1):
         cv2.circle(frame, tuple(point), 10, (0, 140, 255), -1, cv2.LINE_AA)
         cv2.putText(frame, str(index), tuple(point + (12, -12)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 140, 255), 2, cv2.LINE_AA)
+
+
+def _draw_player_footpoints(
+    frame: np.ndarray,
+    boxes: np.ndarray,
+    projection,
+    length: float,
+    width: float,
+    tolerated_outside_m: float,
+) -> tuple[int, int]:
+    acceptable = 0
+    severe = 0
+    for box in boxes:
+        point = ((float(box[0]) + float(box[2])) / 2.0, float(box[3]))
+        try:
+            x, y = projection.image_to_ground(point)
+        except (ValueError, ArithmeticError):
+            continue
+        dx = max(0.0, -x, x - length)
+        dy = max(0.0, -y, y - width)
+        outside = float(np.hypot(dx, dy))
+        if outside <= tolerated_outside_m:
+            color = (30, 220, 30)
+            acceptable += 1
+        else:
+            color = (20, 20, 235)
+            severe += 1
+        center = tuple(np.round(point).astype(int))
+        cv2.circle(frame, center, 10, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.circle(frame, center, 8, color, -1, cv2.LINE_AA)
+    return acceptable, severe
 
 
 def main() -> None:
@@ -92,6 +125,15 @@ def main() -> None:
     if not capture.isOpened():
         raise RuntimeError(f"Video kan niet worden geopend: {video}")
     profile = create_detection_profile(plan.match_format)
+    detector = FootballDetector(player_threshold=0.20, ball_threshold=0.05)
+    player_filter = PlayerFilter(
+        minimum_box_height=24,
+        minimum_aspect_ratio=1.15,
+        maximum_aspect_ratio=6.0,
+        minimum_foot_y_ratio=0.15,
+        minimum_green_ratio=0.18,
+        pitch_calibration=None,
+    )
     tile_width, tile_height = 720, 405
     columns = args.per_category
     rows = int(np.ceil(len(selected) / columns))
@@ -105,10 +147,23 @@ def main() -> None:
             if not success or planned.projection is None:
                 continue
             _draw_field(frame, planned.projection, profile.pitch_length_m, profile.pitch_width_m)
+            _all, people, _balls = detector.detect(frame)
+            people = player_filter.filter(frame, people, planned.frame_number)
+            acceptable, outside = _draw_player_footpoints(
+                frame,
+                people.xyxy,
+                planned.projection,
+                profile.pitch_length_m,
+                profile.pitch_width_m,
+                profile.boundary_layout_tolerance_m,
+            )
             frame = cv2.resize(frame, (tile_width, tile_height), interpolation=cv2.INTER_AREA)
             cv2.rectangle(frame, (0, 0), (tile_width, 58), (18, 18, 18), -1)
             cv2.putText(frame, label, (12, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colors[label], 2, cv2.LINE_AA)
-            detail = f'{evidence["time_seconds"]:.1f}s | voeten binnen marge {evidence["acceptable_ratio"]:.0%} | anker {planned.anchor_id}'
+            detail = (
+                f'{evidence["time_seconds"]:.1f}s | voeten groen {acceptable}, '
+                f'rood {outside} | anker {planned.anchor_id}'
+            )
             cv2.putText(frame, detail, (12, 47), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 235, 235), 1, cv2.LINE_AA)
             row, column = divmod(index, columns)
             sheet[row * tile_height:(row + 1) * tile_height, column * tile_width:(column + 1) * tile_width] = frame

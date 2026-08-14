@@ -4,7 +4,9 @@ from football_ai.calibration.video_projection_plan import (
     PlannedProjection,
     VideoProjectionPlan,
     gate_projection_plan_with_player_evidence,
+    gate_projection_plan_with_boundary_reviews,
 )
+from football_ai.calibration.projection_boundary_review import ProjectionBoundaryReview
 
 
 class VideoProjectionPlanTests(unittest.TestCase):
@@ -68,6 +70,26 @@ class VideoProjectionPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(gated.records[0], plan.records[0])
+
+    def test_human_boundary_review_rejects_plane_but_records_partial_truth(self) -> None:
+        matrix = self._matrix()
+        plan = VideoProjectionPlan(
+            "match.mp4", "8v8", 0.0, 2.0, 1.0,
+            (
+                PlannedProjection(0.0, 0, "candidate", "local", matrix, "candidate"),
+                PlannedProjection(1.0, 30, "candidate", "other", matrix, "candidate"),
+            ),
+        )
+        review = ProjectionBoundaryReview(
+            0.0, 0.5, ("local",), "confirmed", "confirmed", "rejected",
+            "rejected", "rejected", "human_reviewed",
+        )
+
+        gated = gate_projection_plan_with_boundary_reviews(plan, (review,))
+
+        self.assertIsNone(gated.records[0].projection_matrix)
+        self.assertIn("goal=confirmed", gated.records[0].reason)
+        self.assertEqual(gated.records[1], plan.records[1])
 
 
 if __name__ == "__main__":

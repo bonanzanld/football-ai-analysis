@@ -180,6 +180,59 @@ def gate_projection_plan_with_player_evidence(
     )
 
 
+def gate_projection_plan_with_boundary_reviews(
+    plan: VideoProjectionPlan,
+    reviews,
+) -> VideoProjectionPlan:
+    """Remove only the full field plane rejected by a human boundary review.
+
+    Goal and end-line confirmations remain in the separate review/anchor data;
+    a projective field plane cannot be retained when either sideline is wrong.
+    """
+    reviews = tuple(reviews)
+    records = []
+    for item in plan.records:
+        review = next(
+            (
+                candidate
+                for candidate in reviews
+                if candidate.applies(item.time_seconds, item.anchor_id)
+                and candidate.full_projection == "rejected"
+            ),
+            None,
+        )
+        if review is None or item.projection_matrix is None:
+            records.append(item)
+            continue
+        records.append(
+            PlannedProjection(
+                item.time_seconds,
+                item.frame_number,
+                "unknown",
+                item.anchor_id,
+                None,
+                (
+                    "Menselijke grensreview verwerpt volledig veldvlak; "
+                    f"goal={review.goal}, achterlijn={review.end_line}, "
+                    f"zijlijnen={review.sideline_front}/{review.sideline_rear}."
+                ),
+                item.inliers,
+                item.inlier_ratio,
+                item.coverage,
+                item.supporting_line_count,
+                item.supporting_line_length_m,
+            )
+        )
+    return VideoProjectionPlan(
+        plan.video,
+        plan.match_format,
+        plan.start_seconds,
+        plan.duration_seconds,
+        plan.interval_seconds,
+        tuple(records),
+    )
+
+
 class OfflineVideoProjectionAnalyzer:
     """Resolve an entire video section before any QA frames are rendered."""
 

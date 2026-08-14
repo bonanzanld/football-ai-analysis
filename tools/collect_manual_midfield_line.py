@@ -31,8 +31,11 @@ class MidfieldLineCollector:
         video: Path,
         initial_time_seconds: float,
         existing: ManualMidfieldLine | None = None,
+        line_role: str = "midfield",
     ) -> None:
         self.video = video
+        self.line_role = line_role
+        self.line_label = "MIDDENLIJN" if line_role == "midfield" else "ACHTERLIJN"
         self.capture = cv2.VideoCapture(str(video))
         if not self.capture.isOpened():
             raise FileNotFoundError(f"Video kon niet worden geopend: {video}")
@@ -48,7 +51,7 @@ class MidfieldLineCollector:
         self.zoom = 1.0
         self.center: tuple[float, float] | None = None
         self.mapping = (0.0, 0.0, 1.0, 0.0, 0.0)
-        self.status = "Zoek een beeld waarop de witte 11v11-middenlijn goed zichtbaar is."
+        self.status = f"Zoek een beeld waarop de witte 11v11-{self.line_label.lower()} goed zichtbaar is."
         self.saved: ManualMidfieldLine | None = None
         if existing is not None:
             if existing.front_sideline_point is not None:
@@ -280,14 +283,14 @@ class MidfieldLineCollector:
 
     def _draw_panel(self, canvas: np.ndarray) -> None:
         lines = (
-            "11v11-MIDDENLIJN VASTLEGGEN",
+            f"11v11-{self.line_label} VASTLEGGEN",
             "",
             "WAT MOET JE AANKLIKKEN?",
-            "De WITTE MIDDENLIJN van het grote",
+            f"De WITTE {self.line_label} van het grote",
             "11-tegen-11-veld.",
             "",
-            "Dit is de rechte lijn door de",
-            "middencirkel, dwars over het grote veld.",
+            "Dit is de officiele rechte kalklijn",
+            "dwars over de breedte van het grote veld.",
             "Het is NIET een gele 8v8-zijlijn.",
             "",
             "STAP 1 - KLIK 5 PUNTEN",
@@ -304,7 +307,7 @@ class MidfieldLineCollector:
             "Op de 8v8-zijlijn het dichtst bij de camera.",
             "Een hoedje of zichtbaar lijnpunt is voldoende.",
             "De 8v8-zijlijn loopt PARALLEL aan de",
-            "witte 11v11-middenlijn: GEEN kruispunt.",
+            f"witte 11v11-{self.line_label.lower()}: GEEN kruispunt.",
             "NIET ZICHTBAAR? Gebruik , en . om",
             "naar een ander videomoment te bladeren.",
             "Ook nergens zichtbaar? Druk N om deze",
@@ -341,7 +344,9 @@ def _initial_time(output: Path, fallback: float | None) -> float:
     return 0.0
 
 
-def _draw_preview(frame: np.ndarray, observation: ManualMidfieldLine) -> np.ndarray:
+def _draw_preview(
+    frame: np.ndarray, observation: ManualMidfieldLine, line_label: str = "MIDDENLIJN"
+) -> np.ndarray:
     preview = frame.copy()
     first, second = observation.endpoints(frame.shape[1], frame.shape[0])
     cv2.line(preview, first, second, (255, 255, 0), 6, cv2.LINE_AA)
@@ -360,7 +365,7 @@ def _draw_preview(frame: np.ndarray, observation: ManualMidfieldLine) -> np.ndar
         cv2.circle(preview, display, 9, color, -1, cv2.LINE_AA)
         cv2.putText(preview, label, (display[0] + 10, display[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
     cv2.rectangle(preview, (0, 0), (frame.shape[1], 62), (12, 12, 12), -1)
-    cv2.putText(preview, "11v11-MIDDENLIJN | REFERENTIE VOOR 8v8-ZIJLIJNEN", (18, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 230, 255), 2, cv2.LINE_AA)
+    cv2.putText(preview, f"11v11-{line_label} | REFERENTIE VOOR 8v8-ZIJLIJNEN", (18, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 230, 255), 2, cv2.LINE_AA)
     return preview
 
 
@@ -369,6 +374,10 @@ def main() -> None:
     parser.add_argument("--video", required=True)
     parser.add_argument("--format", choices=("6v6", "8v8", "11v11"), default="8v8")
     parser.add_argument("--time", type=float, help="Optioneel startmoment in seconden.")
+    parser.add_argument(
+        "--line-role", choices=("midfield", "end_line_11v11"), default="midfield",
+        help="Sla dezelfde robuuste lijnmeting semantisch op als midden- of achterlijn.",
+    )
     parser.add_argument(
         "--resume-front",
         action="store_true",
@@ -380,21 +389,31 @@ def main() -> None:
     output_dir = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
     perspective_path = output_dir / f"{prefix}_manual_perspective_reference.json"
-    output = output_dir / f"{prefix}_manual_midfield_line.json"
+    suffix = "manual_midfield_line" if args.line_role == "midfield" else "manual_11v11_end_line"
+    output = output_dir / f"{prefix}_{suffix}.json"
     existing = load_manual_midfield_line(output) if args.resume_front else None
     initial_time = existing.time_seconds if existing is not None else _initial_time(perspective_path, args.time)
-    observation = MidfieldLineCollector(video, initial_time, existing=existing).run()
+    observation = MidfieldLineCollector(
+        video, initial_time, existing=existing, line_role=args.line_role
+    ).run()
 
     save_manual_midfield_line(observation, output)
     capture = cv2.VideoCapture(str(video))
     capture.set(cv2.CAP_PROP_POS_FRAMES, observation.frame_number)
     ok, frame = capture.read()
     capture.release()
-    preview_path = output_dir / f"{prefix}_manual_midfield_line.jpg"
+    preview_path = output_dir / f"{prefix}_{suffix}.jpg"
     if ok:
-        cv2.imwrite(str(preview_path), _draw_preview(frame, observation))
+        cv2.imwrite(
+            str(preview_path),
+            _draw_preview(
+                frame, observation,
+                "MIDDENLIJN" if args.line_role == "midfield" else "ACHTERLIJN",
+            ),
+        )
 
-    print(f"11v11-middenlijn opgeslagen: {output}")
+    label = "11v11-middenlijn" if args.line_role == "midfield" else "11v11-achterlijn"
+    print(f"{label} opgeslagen: {output}")
     print(f"Frame {observation.frame_number} ({observation.time_seconds:.1f}s)")
     print(f"Lijnfit: RMS {observation.rms_error_px:.2f}px | max {observation.maximum_error_px:.2f}px")
     if ok:

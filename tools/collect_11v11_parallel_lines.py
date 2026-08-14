@@ -290,7 +290,12 @@ def _line_endpoints(line, width, height):
 def _write_preview(video, reference, path):
     capture = cv2.VideoCapture(str(video))
     panels = []
-    labels = {"midfield": "MIDDENLIJN", "goal_area_5m": "5-METERLIJN", "penalty_area_16m": "16-METERLIJN"}
+    labels = {
+        "midfield": "MIDDENLIJN",
+        "end_line_11v11": "ACHTERLIJN",
+        "goal_area_5m": "5-METERLIJN",
+        "penalty_area_16m": "16-METERLIJN",
+    }
     try:
         for line in reference.lines:
             capture.set(cv2.CAP_PROP_POS_FRAMES, line.frame_number)
@@ -315,18 +320,27 @@ def main():
     parser.add_argument("--video", required=True)
     parser.add_argument("--format", choices=("6v6", "8v8", "11v11"), default="8v8")
     parser.add_argument("--time", type=float, help="Optioneel startmoment voor de 5m-lijn.")
+    parser.add_argument(
+        "--base-line", choices=("midfield", "end_line_11v11"), default="midfield"
+    )
     args = parser.parse_args()
     video = PROJECT_ROOT / "videos" / args.video
     output = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
-    midfield = load_manual_midfield_line(output / f"{prefix}_manual_midfield_line.json")
-    perspective = load_manual_perspective_reference(output / f"{prefix}_manual_perspective_reference.json")
+    base_suffix = (
+        "manual_midfield_line" if args.base_line == "midfield"
+        else "manual_11v11_end_line"
+    )
+    midfield = load_manual_midfield_line(output / f"{prefix}_{base_suffix}.json")
     initial = args.time
     if initial is None:
+        perspective = load_manual_perspective_reference(
+            output / f"{prefix}_manual_perspective_reference.json"
+        )
         initial = next(view.time_seconds for view in perspective.views if view.label == "right_goal")
     extras = ExtraParallelLineCollector(video, initial).run()
     reference = ManualParallelLineReference(
-        video.name, (ManualParallelLine.from_midfield(midfield), *extras)
+        video.name, (ManualParallelLine.from_midfield(midfield, args.base_line), *extras)
     )
     path = output / f"{prefix}_manual_parallel_lines.json"
     save_manual_parallel_lines(reference, path)

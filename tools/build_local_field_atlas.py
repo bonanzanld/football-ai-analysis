@@ -18,6 +18,7 @@ from football_ai.calibration.bootstrap.goal_seed import estimate_backline_endpoi
 from football_ai.calibration.goal_plane_camera import estimate_camera_from_goal_plane
 from football_ai.calibration.goal_structure_observation import load_goal_structure_observations
 from football_ai.calibration.lens_intrinsics_io import load_lens_intrinsics
+from football_ai.calibration.lens_geometry import LensIntrinsics
 from football_ai.calibration.local_field_atlas import (
     LocalFieldAtlas,
     LocalFieldPatch,
@@ -46,10 +47,6 @@ def main() -> None:
     prefix = f"{video.stem}_{args.format}"
     profile = create_detection_profile(args.format)
     reference = create_field_reference_3d(profile)
-    lens, lens_source = load_lens_intrinsics(
-        output / f"{prefix}_lens_geometry_qa.json",
-        selected_zoom_path=output / f"{prefix}_selected_fixed_zoom_segment.json",
-    )
     structures = load_goal_structure_observations(output / f"{prefix}_goal_structure_lines.json")
     selected_zoom_path = output / f"{prefix}_selected_fixed_zoom_segment.json"
     selected_zoom = (
@@ -65,14 +62,29 @@ def main() -> None:
         if not structures:
             raise RuntimeError("Geen goalstructuur gemeten binnen het gekozen vaste-zoomsegment.")
     seeds = {item.goal_id: item for item in load_goal_seeds(output / f"{prefix}_goal_seeds.json")}
-    perspective = load_manual_perspective_reference(
-        output / f"{prefix}_manual_perspective_reference.json"
-    )
-    midfield = load_manual_midfield_line(output / f"{prefix}_manual_midfield_line.json")
     parallel_reference = load_manual_parallel_lines(
         output / f"{prefix}_manual_parallel_lines.json"
     )
-    if midfield.video_name != video.name:
+    lens_path = output / f"{prefix}_lens_geometry_qa.json"
+    selected_lens_path = output / f"{prefix}_selected_fixed_zoom_segment.json"
+    try:
+        lens, lens_source = load_lens_intrinsics(
+            lens_path, selected_zoom_path=selected_lens_path,
+        )
+    except FileNotFoundError:
+        lens, lens_diagnostics = _bootstrap_intrinsics_from_orthogonal_directions(
+            video, structures, parallel_reference
+        )
+        lens_source = "manual_orthogonal_vanishing_points_zero_distortion"
+        lens_path.write_text(json.dumps(lens_diagnostics, indent=2), encoding="utf-8")
+    perspective_path = output / f"{prefix}_manual_perspective_reference.json"
+    perspective = (
+        load_manual_perspective_reference(perspective_path)
+        if perspective_path.exists() else None
+    )
+    midfield_path = output / f"{prefix}_manual_midfield_line.json"
+    midfield = load_manual_midfield_line(midfield_path) if midfield_path.exists() else None
+    if midfield is not None and midfield.video_name != video.name:
         raise RuntimeError("De handmatige 11v11-middenlijn hoort bij een andere video.")
     if parallel_reference.video_name != video.name:
         raise RuntimeError("De parallelle 11v11-lijnen horen bij een andere video.")
@@ -143,8 +155,17 @@ def main() -> None:
         )
         confidence = float(np.clip(np.exp(-estimate.rms_error_px / 8.0) * np.exp(-corner_error / 120.0), 0.05, 1.0))
         ground_homography, reflected = _orient_ground_homography(
-            estimate.projection.ground_homography(), structure.goal_id, seed, profile, lens
+            estimate.projection.ground_homography(), structure.goal_id, seed, profile, lens,
+            front_corner_override=(
+                tuple(explicit_corners["front_corner"])
+                if explicit_corners is not None else None
+            ),
         )
+        if reflected:
+            # Keep the camera solution unchanged during metric anchoring.  The
+            # reflection fixes the measured end line (x = pitch length) and is
+            # therefore applied last to select the field-interior half-plane.
+            ground_homography = estimate.projection.ground_homography()
         if explicit_corners is not None:
             rear_corner = tuple(explicit_corners["rear_corner"])
             front_corner = tuple(explicit_corners["front_corner"])
@@ -157,14 +178,19 @@ def main() -> None:
             np.asarray((rear_corner, front_corner), dtype=np.float64)
         )
         if explicit_corners is not None:
-            supports = json.loads(
-                (output / f"{prefix}_manual_8v8_right_sideline_supports.json").read_text(
-                    encoding="utf-8"
+            support_path = output / f"{prefix}_manual_8v8_right_sideline_supports.json"
+            if support_path.exists():
+                supports = json.loads(support_path.read_text(encoding="utf-8"))
+                raw_sideline_points = (front_corner, supports["front_sideline_support"])
+            else:
+                vanishing = np.asarray(vanishing_points[structure.goal_id], dtype=np.float64)
+                corner = lens.undistort_points(np.asarray((front_corner,), dtype=np.float64))[0]
+                raw_sideline_points = None
+                sideline_points = np.vstack((corner, corner + 0.1 * (vanishing - corner)))
+            if raw_sideline_points is not None:
+                sideline_points = lens.undistort_points(
+                    np.asarray(raw_sideline_points, dtype=np.float64)
                 )
-            )
-            sideline_points = lens.undistort_points(np.asarray(
-                (front_corner, supports["front_sideline_support"]), dtype=np.float64
-            ))
             # Human cone clicks are diagnostics only.  They must never rotate
             # the official direction from the parallel 11v11 line family.
             effective_vanishing = vanishing_points[structure.goal_id]
@@ -189,6 +215,16 @@ def main() -> None:
             tuple(corrected_endpoints[1]), effective_vanishing,
             front_sideline_points=sideline_points,
         )
+        if reflected:
+            reflection = np.asarray(
+                (
+                    (-1.0, 0.0, 2.0 * profile.pitch_length_m),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 0.0, 1.0),
+                ),
+                dtype=np.float64,
+            )
+            ground_homography = ground_homography @ reflection
         patches.append(
             LocalFieldPatch(
                 f"goal-{goal}", structure.frame_number, ground_homography,
@@ -223,9 +259,10 @@ def main() -> None:
             f"palen omgewisseld={swapped} | vlak gespiegeld={reflected}"
         )
     print(f"Overlapzone: {overlap:.1f}m rond het midden")
+    primary = parallel_reference.lines[0]
     print(
-        f"11v11-middenlijnanker: frame {midfield.frame_number} | "
-        f"RMS {midfield.rms_error_px:.2f}px | richting = parallel aan 8v8-zijlijnen"
+        f"11v11-richtingsanker ({primary.line_type}): frame {primary.frame_number} | "
+        f"RMS {primary.rms_error_px:.2f}px | richting = parallel aan 8v8-zijlijnen"
     )
     for goal_id, diagnostic in parallel_diagnostics.items():
         print(
@@ -305,7 +342,112 @@ def _write_preview(video, atlas, lens, path):
         raise RuntimeError("Atlaspreview kon niet worden opgeslagen.")
 
 
+def _transport_point(video, point, source_frame, target_frame, *, step=30):
+    if source_frame == target_frame:
+        return np.asarray(point, dtype=np.float64)
+    direction = 1 if target_frame > source_frame else -1
+    frames = list(range(source_frame, target_frame, direction * step))
+    if frames[-1] != target_frame:
+        frames.append(target_frame)
+    capture = cv2.VideoCapture(str(video))
+    transform = np.eye(3, dtype=np.float64)
+    try:
+        source = _read_frame(capture, frames[0])
+        for first_number, second_number in zip(frames, frames[1:]):
+            target = _read_frame(capture, second_number)
+            try:
+                edge = estimate_ground_frame_edge(
+                    str(first_number), str(second_number), source, target
+                )
+            except ValueError:
+                edge = estimate_frame_edge(
+                    str(first_number), str(second_number), source, target
+                )
+            transform = edge.source_to_target @ transform
+            source = target
+    finally:
+        capture.release()
+    mapped = transform @ np.asarray((*point[:2], 1.0), dtype=np.float64)
+    if abs(float(mapped[2])) < 1e-9:
+        raise RuntimeError("Verdwijnpunt kon niet tussen de ankerframes worden gevolgd.")
+    return mapped[:2] / mapped[2]
+
+
+def _parallel_vanishing_point(reference):
+    extras = tuple(
+        line for line in reference.lines
+        if line.line_type in ("goal_area_5m", "penalty_area_16m")
+    )
+    if len(extras) != 2 or extras[0].frame_number != extras[1].frame_number:
+        raise RuntimeError("5m- en 16m-lijn moeten in hetzelfde frame zijn beoordeeld.")
+    point = np.cross(
+        np.asarray(extras[0].equation, dtype=np.float64),
+        np.asarray(extras[1].equation, dtype=np.float64),
+    )
+    if abs(float(point[2])) < 1e-9:
+        raise RuntimeError("De parallelle 11v11-lijnen leveren geen eindig verdwijnpunt.")
+    point /= point[2]
+    return extras[0].frame_number, point[:2]
+
+
+def _bootstrap_intrinsics_from_orthogonal_directions(video, structures, parallel_reference):
+    if len(structures) != 1:
+        raise RuntimeError(
+            "Automatische lensbootstrap vereist precies een beoordeelde goalstructuur."
+        )
+    structure = structures[0]
+    source_frame, parallel_point = _parallel_vanishing_point(parallel_reference)
+    length_point = _transport_point(
+        video, parallel_point, source_frame, structure.frame_number
+    )
+    lines = {item.name: np.asarray(item.equation, dtype=np.float64) for item in structure.lines}
+    width_point = np.cross(lines["crossbar"], lines["goal_line"])
+    if abs(float(width_point[2])) < 1e-9:
+        raise RuntimeError("Doellat en doellijn leveren geen eindig verdwijnpunt.")
+    width_point /= width_point[2]
+    capture = cv2.VideoCapture(str(video))
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        capture.release()
+    principal = np.asarray((width / 2.0, height / 2.0), dtype=np.float64)
+    focal_squared = -float((length_point - principal) @ (width_point[:2] - principal))
+    if focal_squared <= 0.0:
+        raise RuntimeError("De twee handmatige richtingen leveren geen fysieke camera op.")
+    focal = float(np.sqrt(focal_squared))
+    lens = LensIntrinsics((width, height), focal, tuple(principal), (0.0, 0.0))
+    return lens, {
+        "schema_version": 1,
+        "frame_size": [width, height],
+        "focal_length_px": focal,
+        "principal_point": principal.tolist(),
+        "radial_distortion": [0.0, 0.0],
+        "source": "manual_orthogonal_vanishing_points_zero_distortion",
+        "anchor_frame": structure.frame_number,
+        "length_direction_vanishing_point": length_point.tolist(),
+        "width_direction_vanishing_point": width_point[:2].tolist(),
+    }
+
+
 def _goal_vanishing_points(video, structures, perspective, lens, seeds, parallel_reference):
+    if perspective is None:
+        source_frame, source_point = _parallel_vanishing_point(parallel_reference)
+        result = {}
+        diagnostics = {}
+        for structure in structures:
+            point = _transport_point(
+                video, source_point, source_frame, structure.frame_number
+            )
+            result[structure.goal_id] = tuple(map(float, point))
+            diagnostics[structure.goal_id] = {
+                "difference_px": 0.0,
+                "difference_degrees": 0.0,
+                "automatic_vanishing_point": tuple(map(float, point)),
+                "explicit_vanishing_point": tuple(map(float, point)),
+                "source": "transported_manual_parallel_lines",
+            }
+        return result, diagnostics
     by_label = {item.label: item for item in perspective.views}
     by_goal = {item.goal_id: item for item in structures}
     capture = cv2.VideoCapture(str(video))
@@ -435,11 +577,16 @@ def _bind_vanishing_point_to_observed_sideline(vanishing, corner, observed_point
     return tuple(map(float, projected))
 
 
-def _orient_ground_homography(homography, goal_id, seed, profile, lens):
+def _orient_ground_homography(
+    homography, goal_id, seed, profile, lens, *, front_corner_override=None
+):
+    front_corner = front_corner_override or seed.front_corner
     observations = seed.front_sideline_observations
-    if seed.front_corner is None or not observations:
+    if not observations and seed.front_sideline_support is not None:
+        observations = (seed.front_sideline_support,)
+    if front_corner is None or not observations:
         return homography, False
-    corner = lens.undistort_points(np.asarray((seed.front_corner,), dtype=np.float64))[0]
+    corner = lens.undistort_points(np.asarray((front_corner,), dtype=np.float64))[0]
     observed_points = lens.undistort_points(np.asarray(observations, dtype=np.float64))
     distances = np.linalg.norm(observed_points - corner, axis=1)
     observed = observed_points[int(np.argmax(distances))] - corner

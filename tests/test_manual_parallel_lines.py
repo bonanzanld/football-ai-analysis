@@ -21,3 +21,16 @@ def test_parallel_lines_from_same_frame_recover_vanishing_point():
     )
 
     assert reference.vanishing_point_at_frame(30) == pytest.approx((20.0, 10.0))
+
+
+def test_11v11_end_line_can_be_primary_parallel_reference():
+    reference = ManualParallelLineReference(
+        "match.mp4",
+        (
+            _line("end_line_11v11", 60, (0, 1, -10)),
+            _line("goal_area_5m", 30, (1, 0, -20)),
+            _line("penalty_area_16m", 30, (0, 1, -10)),
+        ),
+    )
+
+    assert reference.lines[0].line_type == "end_line_11v11"

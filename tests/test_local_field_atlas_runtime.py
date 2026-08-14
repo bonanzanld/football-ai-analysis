@@ -58,6 +58,9 @@ class LocalFieldAtlasRuntimeTests(unittest.TestCase):
         self.assertEqual(len(result.polygon), 4)
         self.assertIsNotNone(result.anchor_to_frame)
         self.assertIsNotNone(result.predicted_vanishing_point)
+        expected = result.anchor_to_frame @ homography
+        expected /= expected[2, 2]
+        np.testing.assert_allclose(result.ground_to_frame, expected, atol=1e-9)
 
     def test_vanishing_error(self):
         self.assertAlmostEqual(

@@ -9,7 +9,8 @@ import numpy as np
 from football_ai.calibration.manual_midfield_line import ManualMidfieldLine
 
 
-LINE_TYPES = ("midfield", "goal_area_5m", "penalty_area_16m")
+PRIMARY_LINE_TYPES = ("midfield", "end_line_11v11")
+LINE_TYPES = (*PRIMARY_LINE_TYPES, "goal_area_5m", "penalty_area_16m")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +49,13 @@ class ManualParallelLine:
         )
 
     @classmethod
-    def from_midfield(cls, midfield: ManualMidfieldLine) -> "ManualParallelLine":
+    def from_midfield(
+        cls, midfield: ManualMidfieldLine, line_type: str = "midfield"
+    ) -> "ManualParallelLine":
+        if line_type not in PRIMARY_LINE_TYPES:
+            raise ValueError("Primaire parallelreferentie moet middenlijn of 11v11-achterlijn zijn.")
         return cls(
-            "midfield",
+            line_type,
             midfield.frame_number,
             midfield.time_seconds,
             midfield.points,
@@ -90,8 +95,14 @@ class ManualParallelLineReference:
 
     def __post_init__(self) -> None:
         types = tuple(item.line_type for item in self.lines)
-        if types != LINE_TYPES:
-            raise ValueError("De parallelreferentie vereist middenlijn, 5m-lijn en 16m-lijn.")
+        if (
+            len(types) != 3
+            or types[0] not in PRIMARY_LINE_TYPES
+            or types[1:] != ("goal_area_5m", "penalty_area_16m")
+        ):
+            raise ValueError(
+                "De parallelreferentie vereist middenlijn/achterlijn, 5m-lijn en 16m-lijn."
+            )
 
     def to_dict(self) -> dict:
         return {

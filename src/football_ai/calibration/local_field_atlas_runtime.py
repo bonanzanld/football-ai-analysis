@@ -122,7 +122,9 @@ class LocalFieldAtlasRuntime:
                 edge.inliers,
                 edge.inlier_ratio, coverage,
             )
-        vanishing = matrix[:, 0]
+        # Slicing returns a view.  Normalising that view in place would also
+        # rescale the first homography column and corrupt metric projection.
+        vanishing = matrix[:, 0].copy()
         if abs(float(vanishing[2])) < 1e-9:
             return self._failure(
                 patch_id, recognition, "Atlas-zijlijnen hebben geen eindig verdwijnpunt.",

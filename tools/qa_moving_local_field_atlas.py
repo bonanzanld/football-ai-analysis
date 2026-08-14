@@ -20,7 +20,7 @@ from football_ai.calibration.bootstrap.white_line_detection import (
     extract_white_pitch_mask,
 )
 from football_ai.calibration.image_line_perspective import estimate_sideline_perspective
-from football_ai.calibration.lens_geometry import LensIntrinsics
+from football_ai.calibration.lens_intrinsics_io import load_lens_intrinsics
 from football_ai.calibration.local_field_atlas import load_local_field_atlas
 from football_ai.calibration.local_field_atlas_runtime import (
     FixedPatchTracker,
@@ -46,7 +46,10 @@ def main() -> None:
     output = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
     atlas = load_local_field_atlas(output / f"{prefix}_local_field_atlas.json")
-    lens = _load_lens(output / f"{prefix}_lens_geometry_qa.json")
+    lens, lens_source = load_lens_intrinsics(
+        output / f"{prefix}_lens_geometry_qa.json",
+        selected_zoom_path=output / f"{prefix}_selected_fixed_zoom_segment.json",
+    )
     profile = create_detection_profile(args.format)
 
     capture = cv2.VideoCapture(str(video))
@@ -68,12 +71,12 @@ def main() -> None:
             frame, lens.camera_matrix, lens.distortion_coefficients
         )
     runtime = LocalFieldAtlasRuntime(atlas, anchor_frames)
-    tracker = LocalFieldAtlasTracker(
-        runtime,
-        lambda frame, candidate: _semantic_switch_supported(
+    switch_validator = None
+    if len(atlas.patches) > 1:
+        switch_validator = lambda frame, candidate: _semantic_switch_supported(
             frame, candidate, runtime, atlas, (width, height)
-        ),
-    )
+        )
+    tracker = LocalFieldAtlasTracker(runtime, switch_validator)
     boundary_owners = {
         "sideline_rear": "midfield-rear",
         "sideline_front": "midfield-front",
@@ -250,14 +253,7 @@ def main() -> None:
     )
     print(f"QA-video: {video_path}")
     print(f"QA-rapport: {report_path}")
-
-
-def _load_lens(path: Path) -> LensIntrinsics:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return LensIntrinsics(
-        tuple(data["frame_size"]), float(data["focal_length_px"]),
-        tuple(data["principal_point"]), tuple(data["radial_distortion"]),
-    )
+    print(f"Lensbron: {lens_source}")
 
 
 def _manual_line_support(frame, atlas, patch_id, anchor_to_frame, lens):
@@ -407,34 +403,32 @@ def _tracking_frame_numbers(previous, target, maximum_step):
 
 
 def _bidirectional_boundary_plan(video, sample_frames, maximum_step, lens, runtime, owners):
-    """Fill a forward gap only with a backward path proven in overlap."""
+    """Track each physical boundary outward from its immutable human anchor."""
     if not sample_frames:
         return {}
-    dense = _dense_frame_numbers(sample_frames[0], sample_frames[-1], maximum_step)
-    forward = _track_fixed_boundaries(video, dense, lens, runtime, owners)
-    backward = _track_fixed_boundaries(video, tuple(reversed(dense)), lens, runtime, owners)
-    trusted = set()
-    for frame_number in dense:
-        for name in owners:
-            if _boundary_projections_agree(
-                name,
-                forward.get(frame_number, {}).get(name),
-                backward.get(frame_number, {}).get(name),
-                runtime,
-                runtime.atlas,
-            ):
-                trusted.add(name)
-    plan = {}
-    for frame_number in sample_frames:
-        selected = {}
-        for name in owners:
-            first = forward.get(frame_number, {}).get(name)
-            second = backward.get(frame_number, {}).get(name)
-            if first is not None and first.valid:
-                selected[name] = first
-            elif name in trusted and second is not None and second.valid:
-                selected[name] = second
-        plan[frame_number] = selected
+    plan = {frame_number: {} for frame_number in sample_frames}
+    first, last = sample_frames[0], sample_frames[-1]
+    for name, patch_id in owners.items():
+        patch = runtime.patch_by_id.get(patch_id)
+        if patch is None or not first <= patch.anchor_frame <= last:
+            continue
+        forward_numbers = tuple(sorted(
+            {patch.anchor_frame, *range(patch.anchor_frame, last + 1, maximum_step),
+             *(frame for frame in sample_frames if frame >= patch.anchor_frame)}
+        ))
+        backward_numbers = tuple(sorted(
+            {patch.anchor_frame, *range(first, patch.anchor_frame + 1, maximum_step),
+             *(frame for frame in sample_frames if frame <= patch.anchor_frame)},
+            reverse=True,
+        ))
+        one_owner = {name: patch_id}
+        forward = _track_fixed_boundaries(video, forward_numbers, lens, runtime, one_owner)
+        backward = _track_fixed_boundaries(video, backward_numbers, lens, runtime, one_owner)
+        for frame_number in sample_frames:
+            source = forward if frame_number >= patch.anchor_frame else backward
+            candidate = source.get(frame_number, {}).get(name)
+            if candidate is not None and candidate.valid:
+                plan[frame_number][name] = candidate
     return plan
 
 

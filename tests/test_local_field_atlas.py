@@ -16,6 +16,17 @@ from football_ai.calibration.manual_parallel_lines import (
 
 
 class LocalFieldAtlasTests(unittest.TestCase):
+    def test_single_patch_is_explicitly_partial(self):
+        patch = LocalFieldPatch(
+            "goal-b", 100, np.eye(3),
+            ((28.0, 0.0), (64.0, 0.0), (64.0, 42.5), (28.0, 42.5)),
+            0.8, "human reviewed",
+        )
+        atlas = LocalFieldAtlas("test.mp4", "8v8", 64.0, 42.5, (patch,))
+
+        self.assertFalse(atlas.complete_field_coverage)
+        self.assertFalse(atlas.to_dict()["complete_field_coverage"])
+
     def test_blends_overlapping_local_patches(self) -> None:
         first = LocalFieldPatch(
             "left", 1, np.eye(3), ((0, 0), (40, 0), (40, 42.5), (0, 42.5)), 0.8, "goal-a",

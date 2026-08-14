@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -17,6 +18,7 @@ from football_ai.calibration.goal_structure_observation import (
     GoalStructureLine,
     GoalStructureObservation,
     save_goal_structure_observations,
+    load_goal_structure_observations,
 )
 
 
@@ -205,13 +207,34 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verzamel robuuste lijnen op beide wedstrijdgoals.")
     parser.add_argument("--video", required=True)
     parser.add_argument("--format", choices=("6v6", "8v8", "11v11"), default="8v8")
+    parser.add_argument("--goal", choices=("A", "B"))
+    parser.add_argument("--time", type=float)
     args = parser.parse_args()
     video = PROJECT_ROOT / "videos" / args.video
     output_dir = PROJECT_ROOT / "output" / "pitch_bootstrap"
     prefix = f"{video.stem}_{args.format}"
     seeds = load_goal_seeds(output_dir / f"{prefix}_goal_seeds.json")
+    if args.goal is not None:
+        selected = next(seed for seed in seeds if seed.goal_id == args.goal)
+        if args.time is not None:
+            capture = cv2.VideoCapture(str(video))
+            fps = float(capture.get(cv2.CAP_PROP_FPS))
+            capture.release()
+            if fps <= 0.0:
+                raise RuntimeError("Video-FPS kon niet worden gelezen.")
+            selected = replace(
+                selected,
+                frame_number=int(round(args.time * fps)),
+                time_seconds=float(args.time),
+            )
+        seeds = (selected,)
     observations = GoalStructureCollector(video, seeds).run()
     output = output_dir / f"{prefix}_goal_structure_lines.json"
+    if args.goal is not None and output.exists():
+        previous = load_goal_structure_observations(output)
+        by_goal = {item.goal_id: item for item in previous}
+        by_goal.update({item.goal_id: item for item in observations})
+        observations = tuple(by_goal[key] for key in ("A", "B") if key in by_goal)
     save_goal_structure_observations(observations, output)
     print(f"Doelstructuurlijnen opgeslagen: {output}")
     for goal in observations:

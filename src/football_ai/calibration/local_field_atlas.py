@@ -121,13 +121,20 @@ class LocalFieldAtlas:
     def __post_init__(self) -> None:
         if self.pitch_length_m <= 0.0 or self.pitch_width_m <= 0.0:
             raise ValueError("Atlasafmetingen moeten positief zijn.")
-        if len(self.patches) < 2:
-            raise ValueError("Een veldatlas vereist minimaal twee lokale vlakken.")
+        if not self.patches:
+            raise ValueError("Een veldatlas vereist minimaal een lokaal vlak.")
         if len({item.patch_id for item in self.patches}) != len(self.patches):
             raise ValueError("Lokale atlasvlakken moeten unieke namen hebben.")
 
     def covering_patches(self, ground_point: tuple[float, float]) -> tuple[LocalFieldPatch, ...]:
         return tuple(item for item in self.patches if item.contains(ground_point))
+
+    @property
+    def complete_field_coverage(self) -> bool:
+        tolerance = 1e-6
+        minimum = min(point[0] for patch in self.patches for point in patch.support_polygon)
+        maximum = max(point[0] for patch in self.patches for point in patch.support_polygon)
+        return minimum <= tolerance and maximum >= self.pitch_length_m - tolerance
 
     def blended_projection(
         self,
@@ -240,12 +247,13 @@ class LocalFieldAtlas:
 
     def to_dict(self) -> dict:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "video_name": self.video_name,
             "match_format": self.match_format,
             "pitch_length_m": self.pitch_length_m,
             "pitch_width_m": self.pitch_width_m,
             "patches": [item.to_dict() for item in self.patches],
+            "complete_field_coverage": self.complete_field_coverage,
             "manual_midfield_line": (
                 None if self.manual_midfield_line is None else self.manual_midfield_line.to_dict()
             ),

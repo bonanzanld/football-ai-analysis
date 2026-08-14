@@ -17,7 +17,7 @@ from football_ai.calibration.bootstrap.detection_profile import create_detection
 from football_ai.calibration.bootstrap.goal_seed import estimate_backline_endpoints, load_goal_seeds
 from football_ai.calibration.goal_plane_camera import estimate_camera_from_goal_plane
 from football_ai.calibration.goal_structure_observation import load_goal_structure_observations
-from football_ai.calibration.lens_geometry import LensIntrinsics
+from football_ai.calibration.lens_intrinsics_io import load_lens_intrinsics
 from football_ai.calibration.local_field_atlas import (
     LocalFieldAtlas,
     LocalFieldPatch,
@@ -46,12 +46,24 @@ def main() -> None:
     prefix = f"{video.stem}_{args.format}"
     profile = create_detection_profile(args.format)
     reference = create_field_reference_3d(profile)
-    lens_data = json.loads((output / f"{prefix}_lens_geometry_qa.json").read_text())
-    lens = LensIntrinsics(
-        tuple(lens_data["frame_size"]), float(lens_data["focal_length_px"]),
-        tuple(lens_data["principal_point"]), tuple(lens_data["radial_distortion"]),
+    lens, lens_source = load_lens_intrinsics(
+        output / f"{prefix}_lens_geometry_qa.json",
+        selected_zoom_path=output / f"{prefix}_selected_fixed_zoom_segment.json",
     )
     structures = load_goal_structure_observations(output / f"{prefix}_goal_structure_lines.json")
+    selected_zoom_path = output / f"{prefix}_selected_fixed_zoom_segment.json"
+    selected_zoom = (
+        json.loads(selected_zoom_path.read_text(encoding="utf-8"))["selected"]
+        if selected_zoom_path.exists() else None
+    )
+    if selected_zoom is not None:
+        structures = tuple(
+            item for item in structures
+            if float(selected_zoom["start_seconds"]) <= item.time_seconds
+            <= float(selected_zoom["end_seconds"])
+        )
+        if not structures:
+            raise RuntimeError("Geen goalstructuur gemeten binnen het gekozen vaste-zoomsegment.")
     seeds = {item.goal_id: item for item in load_goal_seeds(output / f"{prefix}_goal_seeds.json")}
     perspective = load_manual_perspective_reference(
         output / f"{prefix}_manual_perspective_reference.json"
@@ -72,6 +84,12 @@ def main() -> None:
     diagnostics = []
     for structure in structures:
         seed = seeds[structure.goal_id]
+        explicit_corners_path = output / f"{prefix}_manual_8v8_right_endline_corners.json"
+        explicit_corners = None
+        if structure.goal_id == "B" and explicit_corners_path.exists():
+            candidate = json.loads(explicit_corners_path.read_text(encoding="utf-8"))
+            if int(candidate["frame_number"]) == structure.frame_number:
+                explicit_corners = candidate
         corners = structure.corners()
         raw = np.asarray([corners[name] for name in ("far_bottom", "far_top", "near_top", "near_bottom")])
         corrected = lens.undistort_points(raw)
@@ -83,10 +101,14 @@ def main() -> None:
         candidates = []
         for swapped in (False, True):
             image_points = corrected[[3, 2, 1, 0]] if swapped else corrected
-            if seed.front_corner is None:
+            front_corner = (
+                tuple(explicit_corners["front_corner"])
+                if explicit_corners is not None else seed.front_corner
+            )
+            if front_corner is None:
                 raise RuntimeError(f"Doel {structure.goal_id} mist de gemeten hoek voor zijn lokale vlak.")
             image_points = np.vstack(
-                (image_points, lens.undistort_points(np.asarray((seed.front_corner,), dtype=np.float64)))
+                (image_points, lens.undistort_points(np.asarray((front_corner,), dtype=np.float64)))
             )
             local_names = (*names, f"corner_{goal}_front")
             view = CameraViewObservations(
@@ -101,8 +123,8 @@ def main() -> None:
             except (ValueError, cv2.error):
                 continue
             corner_error = float("inf")
-            if seed.front_corner is not None:
-                observed = lens.undistort_points(np.asarray((seed.front_corner,), dtype=np.float64))[0]
+            if front_corner is not None:
+                observed = lens.undistort_points(np.asarray((front_corner,), dtype=np.float64))[0]
                 predicted = np.asarray(
                     estimate.projection.project(reference.landmark(f"corner_{goal}_front").point)
                 )
@@ -123,20 +145,37 @@ def main() -> None:
         ground_homography, reflected = _orient_ground_homography(
             estimate.projection.ground_homography(), structure.goal_id, seed, profile, lens
         )
-        rear_corner, front_corner = estimate_backline_endpoints(
-            seed.first_ground, seed.second_ground, seed.goal_width_m,
-            profile.pitch_width_m, seed.rear_corner, seed.front_corner,
-        )
+        if explicit_corners is not None:
+            rear_corner = tuple(explicit_corners["rear_corner"])
+            front_corner = tuple(explicit_corners["front_corner"])
+        else:
+            rear_corner, front_corner = estimate_backline_endpoints(
+                seed.first_ground, seed.second_ground, seed.goal_width_m,
+                profile.pitch_width_m, seed.rear_corner, seed.front_corner,
+            )
         corrected_endpoints = lens.undistort_points(
             np.asarray((rear_corner, front_corner), dtype=np.float64)
         )
-        sideline_points = lens.undistort_points(
-            np.asarray(seed.front_sideline_observations, dtype=np.float64)
-        )
-        effective_vanishing = _bind_vanishing_point_to_observed_sideline(
-            vanishing_points[structure.goal_id], tuple(corrected_endpoints[1]),
-            sideline_points,
-        )
+        if explicit_corners is not None:
+            supports = json.loads(
+                (output / f"{prefix}_manual_8v8_right_sideline_supports.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            sideline_points = lens.undistort_points(np.asarray(
+                (front_corner, supports["front_sideline_support"]), dtype=np.float64
+            ))
+            # Human cone clicks are diagnostics only.  They must never rotate
+            # the official direction from the parallel 11v11 line family.
+            effective_vanishing = vanishing_points[structure.goal_id]
+        else:
+            sideline_points = lens.undistort_points(
+                np.asarray(seed.front_sideline_observations, dtype=np.float64)
+            )
+            effective_vanishing = _bind_vanishing_point_to_observed_sideline(
+                vanishing_points[structure.goal_id], tuple(corrected_endpoints[1]),
+                sideline_points,
+            )
         ground_homography, sideline_rms = align_patch_to_front_sideline(
             ground_homography, structure.goal_id, profile.pitch_length_m,
             profile.pitch_width_m, sideline_points,
@@ -176,6 +215,7 @@ def main() -> None:
     preview_path = output / f"{prefix}_local_field_atlas_qa.jpg"
     _write_preview(video, atlas, lens, preview_path)
     print(f"Lokale veldatlas opgeslagen: {atlas_path}")
+    print(f"Lensbron: {lens_source}")
     for goal, swapped, reflected, rms, corner, sideline_rms, confidence in diagnostics:
         print(
             f"Vlak {goal}: doel-RMS {rms:.2f}px | hoekcontrole {corner:.2f}px | "
@@ -272,7 +312,10 @@ def _goal_vanishing_points(video, structures, perspective, lens, seeds, parallel
     result = {}
     diagnostics = {}
     try:
-        for goal_id, label in (("A", "left_goal"), ("B", "right_goal")):
+        for goal_id, label in (
+            (item.goal_id, "left_goal" if item.goal_id == "A" else "right_goal")
+            for item in structures
+        ):
             view = by_label[label]
             structure = by_goal[goal_id]
             transform = np.eye(3, dtype=np.float64)

@@ -51,8 +51,8 @@ class AnchorRecognition:
 
 class CameraAnchorRecognizer:
     def __init__(self, appearances: tuple[AnchorAppearance, ...]) -> None:
-        if len(appearances) < 2:
-            raise ValueError("Camerastandherkenning vereist minimaal twee ankerbeelden.")
+        if not appearances:
+            raise ValueError("Camerastandherkenning vereist minimaal een ankerbeeld.")
         self.appearances = appearances
         self.orb = cv2.ORB_create(nfeatures=3500, fastThreshold=12)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -94,8 +94,8 @@ class CameraAnchorRecognizer:
                 scores,
                 f"Beste kandidaat {best.anchor_id} is onvoldoende ondersteund.",
             )
-        second = ranked[1]
-        if second.reliable and best.score < second.score * 1.20:
+        second = ranked[1] if len(ranked) > 1 else None
+        if second is not None and second.reliable and best.score < second.score * 1.20:
             return AnchorRecognition(
                 AnchorRecognitionStatus.AMBIGUOUS,
                 None,

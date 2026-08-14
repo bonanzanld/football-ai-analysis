@@ -17,6 +17,21 @@ from football_ai.calibration.local_field_atlas_runtime import (
 
 
 class LocalFieldAtlasRuntimeTests(unittest.TestCase):
+    def test_runtime_accepts_one_patch_for_fixed_segment(self):
+        patch = LocalFieldPatch(
+            "goal-b", 100, np.eye(3),
+            ((28.0, 0.0), (64.0, 0.0), (64.0, 42.5), (28.0, 42.5)),
+            0.8, "fixed segment",
+        )
+        atlas = LocalFieldAtlas("match.mp4", "8v8", 64.0, 42.5, (patch,))
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.putText(frame, "texture", (200, 350), cv2.FONT_HERSHEY_SIMPLEX, 4, (255, 255, 255), 10)
+        noise = np.random.default_rng(3).integers(0, 40, frame.shape, dtype=np.uint8)
+
+        runtime = LocalFieldAtlasRuntime(atlas, {"goal-b": cv2.add(frame, noise)})
+
+        self.assertEqual(tuple(runtime.patch_by_id), ("goal-b",))
+
     @staticmethod
     def _frame(seed):
         rng = np.random.default_rng(seed)

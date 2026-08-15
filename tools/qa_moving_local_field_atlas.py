@@ -108,6 +108,8 @@ def main() -> None:
         runtime, boundary_owners,
     )
     last_tracking_number = None
+    last_direction_confirmation = None
+    last_endline_confirmation = None
     for index in range(samples):
         time_seconds = args.start + index * args.interval
         frame_number = int(round(time_seconds * fps))
@@ -140,6 +142,7 @@ def main() -> None:
         supporting = 0
         manual_support = {}
         boundary_support = _verified_boundary_support(corrected, visible_segments)
+        minimum_white_support = _minimum_white_support(height)
         direction_confirmed = False
         reason = projection.reason
         if projection.valid and polygon is not None:
@@ -176,14 +179,23 @@ def main() -> None:
                     )
             else:
                 reason = "Atlas gekoppeld, maar in dit beeld ontbreken twee lange witte controlelijnen."
-            # The support band deliberately covers chalk width, lens correction
-            # and a few pixels of registration uncertainty. A solid 8% within
-            # that 18px band is meaningful white-paint evidence at 4K.
-            confirmed_manual = sum(value >= 0.08 for value in manual_support.values())
+            # The support band covers chalk width, lens correction and a few
+            # pixels of registration uncertainty.  Band width and required
+            # paint density scale with resolution instead of diluting 720p.
+            confirmed_manual = sum(
+                value >= minimum_white_support for value in manual_support.values()
+            )
             confirmed_end_line = any(
-                name.startswith("end_line_") and value >= 0.08
+                name.startswith("end_line_") and value >= minimum_white_support
                 for name, value in boundary_support.items()
             )
+            single_predicted_line = (
+                not perspective.valid and len(perspective.supporting_lines) == 1
+            )
+            if direction_confirmed or single_predicted_line:
+                last_direction_confirmation = time_seconds
+            if confirmed_end_line:
+                last_endline_confirmation = time_seconds
             if confirmed_manual >= 2 and confirmed_end_line:
                 status = "valid"
                 reason = "Perspectief en witte achterlijn bevestigen samen het atlasvlak."
@@ -192,8 +204,24 @@ def main() -> None:
             elif direction_confirmed and confirmed_end_line:
                 status = "valid"
                 reason = "Zijlijnrichting en witte achterlijn bevestigen samen het atlasvlak."
+            elif single_predicted_line and confirmed_end_line:
+                status = "valid"
+                direction_confirmed = True
+                reason = "Een lange lengtelijn en de witte achterlijn bevestigen samen het atlasvlak."
+            elif _temporally_joint_evidence(
+                time_seconds,
+                last_direction_confirmation,
+                last_endline_confirmation,
+            ):
+                status = "valid"
+                direction_confirmed = True
+                reason = (
+                    "Lengterichting en witte achterlijn zijn temporeel binnen 3 seconden "
+                    "bevestigd."
+                )
         visible_segments = _filter_supported_boundaries(
-            visible_segments, boundary_support, direction_confirmed
+            visible_segments, boundary_support, direction_confirmed,
+            minimum_white_support,
         )
         counts[status] += 1
         writer.write(
@@ -291,7 +319,7 @@ def _manual_line_support(frame, atlas, patch_id, anchor_to_frame, lens):
         mask = np.zeros_like(white)
         cv2.line(
             mask, tuple(np.rint(first).astype(int)), tuple(np.rint(second).astype(int)),
-            255, 18, cv2.LINE_AA,
+            255, _support_band_thickness(frame.shape[0]), cv2.LINE_AA,
         )
         pixels = mask > 0
         result[line.line_type] = (
@@ -313,13 +341,39 @@ def _verified_boundary_support(frame, segments):
             mask,
             tuple(np.rint(segment.image_start).astype(int)),
             tuple(np.rint(segment.image_end).astype(int)),
-            255, 18, cv2.LINE_AA,
+            255, _support_band_thickness(frame.shape[0]), cv2.LINE_AA,
         )
         pixels = mask > 0
         result[segment.name] = (
             float(np.count_nonzero(white[pixels])) / max(float(np.count_nonzero(pixels)), 1.0)
         )
     return result
+
+
+def _support_band_thickness(frame_height: int) -> int:
+    """Scale the 4K paint/registration band without diluting 720p evidence."""
+    return max(6, int(round(18.0 * frame_height / 2160.0)))
+
+
+def _minimum_white_support(frame_height: int) -> float:
+    """Account for sparse antialiased paint pixels in lower-resolution video."""
+    scale = float(np.clip((frame_height - 720) / (2160 - 720), 0.0, 1.0))
+    return 0.06 + 0.02 * scale
+
+
+def _temporally_joint_evidence(
+    time_seconds: float,
+    direction_time: float | None,
+    endline_time: float | None,
+    *,
+    maximum_age_seconds: float = 3.0,
+) -> bool:
+    return (
+        direction_time is not None
+        and endline_time is not None
+        and 0.0 <= time_seconds - direction_time <= maximum_age_seconds
+        and 0.0 <= time_seconds - endline_time <= maximum_age_seconds
+    )
 
 
 def _semantic_switch_supported(frame, projection, runtime, atlas, frame_size):
@@ -379,7 +433,9 @@ def _compose_verified_boundaries(projections, runtime, atlas, frame_size):
     return tuple(segments)
 
 
-def _filter_supported_boundaries(segments, white_support, sideline_direction_confirmed):
+def _filter_supported_boundaries(
+    segments, white_support, sideline_direction_confirmed, minimum_white_support
+):
     """Never render a boundary that only looks visually trackable.
 
     End lines are painted 11v11 lines and therefore need local white-paint
@@ -390,7 +446,7 @@ def _filter_supported_boundaries(segments, white_support, sideline_direction_con
     supported = []
     for segment in segments:
         if segment.name.startswith("end_line_"):
-            if white_support.get(segment.name, 0.0) >= 0.08:
+            if white_support.get(segment.name, 0.0) >= minimum_white_support:
                 supported.append(segment)
         elif segment.name.startswith("sideline_") and sideline_direction_confirmed:
             supported.append(segment)

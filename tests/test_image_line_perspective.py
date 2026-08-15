@@ -33,6 +33,18 @@ class ImageLinePerspectiveTests(unittest.TestCase):
         )
         self.assertFalse(result.valid)
 
+    def test_rejects_two_fragments_from_same_physical_line(self) -> None:
+        polygon = np.asarray(((100.0, 300.0), (700.0, 166.6667), (650.0, 275.0), (200.0, 500.0)))
+        result = estimate_sideline_perspective(
+            (
+                self._line((100.0, 300.0), (350.0, 244.4444)),
+                self._line((360.0, 242.2222), (610.0, 186.6667)),
+            ),
+            polygon,
+            (1280, 720),
+        )
+        self.assertFalse(result.valid)
+
 
 if __name__ == "__main__":
     unittest.main()

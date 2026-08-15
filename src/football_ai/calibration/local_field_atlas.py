@@ -10,6 +10,7 @@ from scipy.optimize import least_squares
 
 from football_ai.calibration.manual_midfield_line import ManualMidfieldLine
 from football_ai.calibration.manual_parallel_lines import ManualParallelLineReference
+from football_ai.calibration.field_topology import BOUNDARY_CORNERS, ground_corners
 
 
 BOUNDARY_NAMES = ("end_line_a", "sideline_rear", "end_line_b", "sideline_front")
@@ -193,23 +194,19 @@ class LocalFieldAtlas:
                 visible_polygon = tuple(tuple(map(float, item)) for item in intersection.reshape(-1, 2))
         minimum_x = min(item[0] for item in patch.support_polygon)
         maximum_x = max(item[0] for item in patch.support_polygon)
+        corners = ground_corners(self.pitch_length_m, self.pitch_width_m)
         boundaries = {
-            # Sidelines are the two shared longitudinal rays and may be shown
-            # across the image as candidate evidence. The opposite end line is
-            # never invented by a local goal patch.
-            "sideline_rear": ((0.0, 0.0), (self.pitch_length_m, 0.0)),
-            "sideline_front": (
-                (0.0, self.pitch_width_m),
-                (self.pitch_length_m, self.pitch_width_m),
-            ),
+            name: (corners[first], corners[second])
+            for name, (first, second) in BOUNDARY_CORNERS.items()
+            if name.startswith("sideline_")
         }
         tolerance = 1e-6
         if abs(minimum_x) <= tolerance:
-            boundaries["end_line_a"] = ((0.0, 0.0), (0.0, self.pitch_width_m))
+            first, second = BOUNDARY_CORNERS["end_line_a"]
+            boundaries["end_line_a"] = (corners[first], corners[second])
         if abs(maximum_x - self.pitch_length_m) <= tolerance:
-            boundaries["end_line_b"] = (
-                (self.pitch_length_m, 0.0), (self.pitch_length_m, self.pitch_width_m)
-            )
+            first, second = BOUNDARY_CORNERS["end_line_b"]
+            boundaries["end_line_b"] = (corners[first], corners[second])
         segments = []
         status = {name: "UNKNOWN" for name in BOUNDARY_NAMES}
         rectangle = (0, 0, width, height)

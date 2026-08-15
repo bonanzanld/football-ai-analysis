@@ -7,6 +7,10 @@ from football_ai.calibration.bootstrap.goal_seed import (
     GoalSeed,
     estimate_backline_endpoints,
 )
+from football_ai.calibration.field_topology import (
+    DUTCH_BOUNDARY_NAMES,
+    boundary_corner_pairs,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,11 +42,9 @@ class SeededFieldContour:
     pitch_width_bounds_m: tuple[float, float]
     corners: tuple[SeededFieldCorner, ...]
 
-    BOUNDARIES = (
-        ("achterlijn_links", "linksachter", "linksvoor"),
-        ("zijlijn_achter", "linksachter", "rechtsachter"),
-        ("achterlijn_rechts", "rechtsachter", "rechtsvoor"),
-        ("zijlijn_voor", "linksvoor", "rechtsvoor"),
+    BOUNDARIES = tuple(
+        (DUTCH_BOUNDARY_NAMES[name], first, second)
+        for name, first, second in boundary_corner_pairs()
     )
 
     def to_dict(self) -> dict:

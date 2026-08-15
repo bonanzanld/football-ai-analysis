@@ -143,6 +143,7 @@ def main() -> None:
         observed_vp = None
         vp_error = None
         supporting = 0
+        perspective = None
         manual_support = {}
         boundary_support = _verified_boundary_support(corrected, visible_segments)
         minimum_white_support = _minimum_white_support(height)
@@ -281,7 +282,7 @@ def main() -> None:
                 "supporting_white_lines": supporting,
                 "supporting_direction_segments": [
                     item.to_dict() for item in perspective.supporting_lines
-                ],
+                ] if perspective is not None else [],
                 "manual_line_white_support": manual_support,
                 "verified_boundary_white_support": boundary_support,
                 "tracked_boundaries": [segment.name for segment in visible_segments],

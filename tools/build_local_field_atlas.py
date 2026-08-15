@@ -96,9 +96,12 @@ def main() -> None:
     diagnostics = []
     for structure in structures:
         seed = seeds[structure.goal_id]
-        explicit_corners_path = output / f"{prefix}_manual_8v8_right_endline_corners.json"
+        field_side = "left" if structure.goal_id == "A" else "right"
+        explicit_corners_path = (
+            output / f"{prefix}_manual_8v8_{field_side}_endline_corners.json"
+        )
         explicit_corners = None
-        if structure.goal_id == "B" and explicit_corners_path.exists():
+        if explicit_corners_path.exists():
             candidate = json.loads(explicit_corners_path.read_text(encoding="utf-8"))
             if int(candidate["frame_number"]) == structure.frame_number:
                 explicit_corners = candidate
@@ -178,7 +181,9 @@ def main() -> None:
             np.asarray((rear_corner, front_corner), dtype=np.float64)
         )
         if explicit_corners is not None:
-            support_path = output / f"{prefix}_manual_8v8_right_sideline_supports.json"
+            support_path = (
+                output / f"{prefix}_manual_8v8_{field_side}_sideline_supports.json"
+            )
             if support_path.exists():
                 supports = json.loads(support_path.read_text(encoding="utf-8"))
                 raw_sideline_points = (front_corner, supports["front_sideline_support"])

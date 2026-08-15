@@ -27,6 +27,26 @@ class LocalFieldAtlasTests(unittest.TestCase):
         self.assertFalse(atlas.complete_field_coverage)
         self.assertFalse(atlas.to_dict()["complete_field_coverage"])
 
+    def test_complete_coverage_requires_connected_full_width_support(self):
+        matrix = np.eye(3, dtype=np.float64)
+        gap = LocalFieldAtlas(
+            "clip.mp4", "8v8", 64.0, 42.5,
+            (
+                LocalFieldPatch("left", 0, matrix, ((0, 0), (20, 0), (20, 42.5), (0, 42.5)), 1.0, "test"),
+                LocalFieldPatch("right", 0, matrix, ((30, 0), (64, 0), (64, 42.5), (30, 42.5)), 1.0, "test"),
+            ),
+        )
+        connected = LocalFieldAtlas(
+            "clip.mp4", "8v8", 64.0, 42.5,
+            (
+                LocalFieldPatch("left", 0, matrix, ((0, 0), (40, 0), (40, 42.5), (0, 42.5)), 1.0, "test"),
+                LocalFieldPatch("right", 0, matrix, ((24, 0), (64, 0), (64, 42.5), (24, 42.5)), 1.0, "test"),
+            ),
+        )
+
+        self.assertFalse(gap.complete_field_coverage)
+        self.assertTrue(connected.complete_field_coverage)
+
     def test_blends_overlapping_local_patches(self) -> None:
         first = LocalFieldPatch(
             "left", 1, np.eye(3), ((0, 0), (40, 0), (40, 42.5), (0, 42.5)), 0.8, "goal-a",

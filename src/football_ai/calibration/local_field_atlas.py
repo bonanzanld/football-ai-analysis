@@ -133,9 +133,24 @@ class LocalFieldAtlas:
     @property
     def complete_field_coverage(self) -> bool:
         tolerance = 1e-6
-        minimum = min(point[0] for patch in self.patches for point in patch.support_polygon)
-        maximum = max(point[0] for patch in self.patches for point in patch.support_polygon)
-        return minimum <= tolerance and maximum >= self.pitch_length_m - tolerance
+        intervals = sorted(
+            (
+                min(point[0] for point in patch.support_polygon),
+                max(point[0] for point in patch.support_polygon),
+            )
+            for patch in self.patches
+            if min(point[1] for point in patch.support_polygon) <= tolerance
+            and max(point[1] for point in patch.support_polygon)
+            >= self.pitch_width_m - tolerance
+        )
+        if not intervals or intervals[0][0] > tolerance:
+            return False
+        covered_until = intervals[0][1]
+        for start, end in intervals[1:]:
+            if start > covered_until + tolerance:
+                return False
+            covered_until = max(covered_until, end)
+        return covered_until >= self.pitch_length_m - tolerance
 
     def blended_projection(
         self,

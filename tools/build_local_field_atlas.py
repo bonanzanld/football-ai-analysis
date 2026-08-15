@@ -221,13 +221,8 @@ def main() -> None:
             front_sideline_points=sideline_points,
         )
         if reflected:
-            reflection = np.asarray(
-                (
-                    (-1.0, 0.0, 2.0 * profile.pitch_length_m),
-                    (0.0, 1.0, 0.0),
-                    (0.0, 0.0, 1.0),
-                ),
-                dtype=np.float64,
+            reflection = _reflection_about_endline(
+                structure.goal_id, profile.pitch_length_m
             )
             ground_homography = ground_homography @ reflection
         patches.append(
@@ -276,6 +271,21 @@ def main() -> None:
             f"({diagnostic['difference_degrees']:.2f} graden)"
         )
     print(f"QA-preview: {preview_path}")
+
+
+def _reflection_about_endline(goal_id: str, pitch_length_m: float) -> np.ndarray:
+    """Reverse field depth without moving the owning physical end line."""
+    if goal_id not in ("A", "B"):
+        raise ValueError("Spiegeling vereist Doel A of Doel B.")
+    end_x = 0.0 if goal_id == "A" else float(pitch_length_m)
+    return np.asarray(
+        (
+            (-1.0, 0.0, 2.0 * end_x),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+        ),
+        dtype=np.float64,
+    )
 
 
 def _write_preview(video, atlas, lens, path):

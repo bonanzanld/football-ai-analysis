@@ -1,6 +1,7 @@
 import unittest
 
 from tools.qa_moving_local_field_atlas import (
+    _carry_tracked_evidence,
     _minimum_white_support,
     _support_band_thickness,
     _temporally_joint_evidence,
@@ -18,6 +19,17 @@ class MovingLocalFieldAtlasQATests(unittest.TestCase):
         self.assertTrue(_temporally_joint_evidence(12.0, 11.0, 9.0))
         self.assertFalse(_temporally_joint_evidence(12.1, 11.0, 9.0))
         self.assertFalse(_temporally_joint_evidence(12.0, None, 11.0))
+
+    def test_visual_evidence_survives_only_continuous_tracking(self):
+        self.assertTrue(
+            _carry_tracked_evidence(False, newly_confirmed=True, tracking_valid=True)
+        )
+        self.assertTrue(
+            _carry_tracked_evidence(True, newly_confirmed=False, tracking_valid=True)
+        )
+        self.assertFalse(
+            _carry_tracked_evidence(True, newly_confirmed=False, tracking_valid=False)
+        )
 
 
 if __name__ == "__main__":

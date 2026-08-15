@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import subprocess
@@ -110,6 +111,8 @@ def main() -> None:
     last_tracking_number = None
     last_direction_confirmation = None
     last_endline_confirmation = None
+    tracked_direction_evidence = False
+    tracked_endline_evidence = False
     for index in range(samples):
         time_seconds = args.start + index * args.interval
         frame_number = int(round(time_seconds * fps))
@@ -192,6 +195,20 @@ def main() -> None:
             single_predicted_line = (
                 not perspective.valid and len(perspective.supporting_lines) == 1
             )
+            tracked_direction_evidence = _carry_tracked_evidence(
+                tracked_direction_evidence,
+                newly_confirmed=direction_confirmed or single_predicted_line,
+                tracking_valid=projection.valid,
+            )
+            endline_tracking_valid = any(
+                name.startswith("end_line_") and candidate.valid
+                for name, candidate in boundary_projections.items()
+            )
+            tracked_endline_evidence = _carry_tracked_evidence(
+                tracked_endline_evidence,
+                newly_confirmed=confirmed_end_line,
+                tracking_valid=endline_tracking_valid,
+            )
             if direction_confirmed or single_predicted_line:
                 last_direction_confirmation = time_seconds
             if confirmed_end_line:
@@ -218,6 +235,12 @@ def main() -> None:
                 reason = (
                     "Lengterichting en witte achterlijn zijn temporeel binnen 3 seconden "
                     "bevestigd."
+                )
+            elif tracked_direction_evidence and tracked_endline_evidence:
+                status = "valid"
+                direction_confirmed = True
+                reason = (
+                    "Eerder bevestigde lengtelijn en achterlijn worden onafgebroken gevolgd."
                 )
         visible_segments = _filter_supported_boundaries(
             visible_segments, boundary_support, direction_confirmed,
@@ -248,9 +271,14 @@ def main() -> None:
                 "observed_vanishing_point": observed_vp,
                 "vanishing_point_error_degrees": vp_error,
                 "supporting_white_lines": supporting,
+                "supporting_direction_segments": [
+                    item.to_dict() for item in perspective.supporting_lines
+                ],
                 "manual_line_white_support": manual_support,
                 "verified_boundary_white_support": boundary_support,
                 "tracked_boundaries": [segment.name for segment in visible_segments],
+                "tracked_direction_evidence": tracked_direction_evidence,
+                "tracked_endline_evidence": tracked_endline_evidence,
                 "reason": reason,
             }
         )
@@ -259,6 +287,20 @@ def main() -> None:
             print(f"Verwerkt: {(index + 1) * args.interval:.0f}s / {duration:.0f}s")
     capture.release()
     writer.release()
+    _backfill_bidirectional_direction_evidence(video, records)
+    for record in records:
+        if (
+            record["status"] == "candidate"
+            and record.get("tracked_direction_evidence", False)
+            and record.get("tracked_endline_evidence", False)
+        ):
+            record["status"] = "valid"
+            record["reason"] = (
+                "Witte lengtelijn bidirectioneel gevolgd en achterlijn continu bevestigd."
+            )
+    counts = dict(Counter(record["status"] for record in records))
+    for name in ("valid", "candidate", "unknown"):
+        counts.setdefault(name, 0)
     _transcode(raw_path, video_path)
 
     report_path = output / f"{prefix}_moving_local_atlas_qa{suffix}.json"
@@ -374,6 +416,71 @@ def _temporally_joint_evidence(
         and 0.0 <= time_seconds - direction_time <= maximum_age_seconds
         and 0.0 <= time_seconds - endline_time <= maximum_age_seconds
     )
+
+
+def _carry_tracked_evidence(
+    previously_confirmed: bool,
+    *,
+    newly_confirmed: bool,
+    tracking_valid: bool,
+) -> bool:
+    """Keep visual evidence only while its owning geometry tracks continuously."""
+    return bool(tracking_valid and (previously_confirmed or newly_confirmed))
+
+
+def _backfill_bidirectional_direction_evidence(video, records) -> None:
+    """Track one strongly detected field line through every metric projection."""
+    seeds = []
+    for index, record in enumerate(records):
+        homography = record.get("ground_homography")
+        for segment in record.get("supporting_direction_segments", ()):
+            if homography is None:
+                continue
+            score = float(segment["white_support"]) * float(segment["length_pixels"])
+            seeds.append((score, index, segment))
+    if not seeds:
+        return
+    _score, seed_index, segment = max(seeds, key=lambda item: item[0])
+    seed_homography = np.asarray(records[seed_index]["ground_homography"], dtype=np.float64)
+    seed_points = np.asarray(
+        ((*segment["start"], 1.0), (*segment["end"], 1.0)), dtype=np.float64
+    )
+    capture = cv2.VideoCapture(str(video))
+    try:
+        for record in records:
+            homography = record.get("ground_homography")
+            if homography is None:
+                record["tracked_direction_line_support"] = 0.0
+                continue
+            transform = np.asarray(homography, dtype=np.float64) @ np.linalg.inv(seed_homography)
+            mapped = (transform @ seed_points.T).T
+            if np.any(np.abs(mapped[:, 2]) < 1e-9):
+                record["tracked_direction_line_support"] = 0.0
+                continue
+            mapped = mapped[:, :2] / mapped[:, 2:3]
+            capture.set(cv2.CAP_PROP_POS_FRAMES, int(record["frame_number"]))
+            ok, frame = capture.read()
+            if not ok:
+                record["tracked_direction_line_support"] = 0.0
+                continue
+            _grass, white = extract_white_pitch_mask(frame)
+            mask = np.zeros_like(white)
+            cv2.line(
+                mask,
+                tuple(np.rint(mapped[0]).astype(int)),
+                tuple(np.rint(mapped[1]).astype(int)),
+                255,
+                _support_band_thickness(frame.shape[0]),
+                cv2.LINE_AA,
+            )
+            pixels = mask > 0
+            support = float(np.count_nonzero(white[pixels])) / max(
+                float(np.count_nonzero(pixels)), 1.0
+            )
+            record["tracked_direction_line_support"] = support
+            record["tracked_direction_evidence"] = support >= 0.20
+    finally:
+        capture.release()
 
 
 def _semantic_switch_supported(frame, projection, runtime, atlas, frame_size):

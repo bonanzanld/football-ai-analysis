@@ -108,6 +108,9 @@ def main() -> None:
         video, sample_frame_numbers, maximum_tracking_step, lens,
         runtime, boundary_owners,
     )
+    semantic_anchor_by_frame = {
+        patch.anchor_frame: patch.patch_id for patch in atlas.patches
+    }
     last_tracking_number = None
     last_direction_confirmation = None
     last_endline_confirmation = None
@@ -128,7 +131,11 @@ def main() -> None:
             if not ok:
                 break
             corrected = cv2.undistort(frame, lens.camera_matrix, lens.distortion_coefficients)
-            projection = tracker.update(corrected)
+            semantic_patch = semantic_anchor_by_frame.get(tracking_number)
+            if tracker.current is None and semantic_patch is not None:
+                projection = tracker.seed_semantic_patch(corrected, semantic_patch)
+            else:
+                projection = tracker.update(corrected)
             last_tracking_number = tracking_number
         if corrected is None or projection is None or last_tracking_number != frame_number:
             break

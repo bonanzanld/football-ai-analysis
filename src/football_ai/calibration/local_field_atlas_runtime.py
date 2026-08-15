@@ -243,6 +243,18 @@ class LocalFieldAtlasTracker:
         self.previous_frame = None
         self.current = None
 
+    def seed_semantic_patch(
+        self,
+        frame: np.ndarray,
+        patch_id: str,
+    ) -> AtlasRuntimeProjection:
+        """Start from an explicitly identified patch at its reviewed anchor frame."""
+        recognition = self.runtime.recognizer.recognize(frame)
+        projection = self.runtime.project_with_patch(frame, patch_id, recognition)
+        if projection.valid:
+            return self._accept(frame, projection)
+        return projection
+
     def update(self, frame: np.ndarray) -> AtlasRuntimeProjection:
         direct = self.runtime.project(frame)
         if self.current is None or self.previous_frame is None:

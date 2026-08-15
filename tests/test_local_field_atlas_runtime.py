@@ -123,6 +123,23 @@ class LocalFieldAtlasRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.patch_id, "goal-a")
 
+    def test_tracker_can_seed_explicit_semantic_anchor_without_visual_switch_vote(self):
+        runtime = Mock()
+        goal_a = self._projection("goal-a")
+        runtime.recognizer.recognize.return_value = goal_a.recognition
+        runtime.project_with_patch.return_value = goal_a
+        tracker = LocalFieldAtlasTracker(runtime, lambda _frame, _candidate: False)
+        frame = np.zeros((20, 20, 3), np.uint8)
+
+        result = tracker.seed_semantic_patch(frame, "goal-a")
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.patch_id, "goal-a")
+        self.assertEqual(tracker.current.patch_id, "goal-a")
+        runtime.project_with_patch.assert_called_once_with(
+            frame, "goal-a", goal_a.recognition
+        )
+
     def test_tracker_checks_all_patches_after_tracking_loss(self):
         runtime = Mock()
         runtime.patch_by_id = {

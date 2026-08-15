@@ -264,6 +264,14 @@ def main() -> None:
                     None if projection.ground_to_frame is None
                     else np.asarray(projection.ground_to_frame, dtype=float).tolist()
                 ),
+                "ground_support_polygon": (
+                    []
+                    if projection.patch_id is None
+                    else [
+                        list(map(float, point))
+                        for point in runtime.patch_by_id[projection.patch_id].support_polygon
+                    ]
+                ),
                 "inliers": projection.inliers,
                 "inlier_ratio": projection.inlier_ratio,
                 "coverage": projection.coverage,
@@ -309,6 +317,10 @@ def main() -> None:
             {
                 "schema_version": 1,
                 "video": str(video),
+                "validation_scope": (
+                    "full_field" if atlas.complete_field_coverage else "local_patch"
+                ),
+                "complete_field_coverage": atlas.complete_field_coverage,
                 "start_seconds": args.start,
                 "duration_seconds": duration,
                 "interval_seconds": args.interval,

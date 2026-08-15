@@ -61,6 +61,11 @@ class LocalFieldAtlasRuntimeTests(unittest.TestCase):
         expected = result.anchor_to_frame @ homography
         expected /= expected[2, 2]
         np.testing.assert_allclose(result.ground_to_frame, expected, atol=1e-9)
+        expected_support = []
+        for point in patches[0].support_polygon:
+            projected = expected @ np.asarray((*point, 1.0))
+            expected_support.append(projected[:2] / projected[2])
+        np.testing.assert_allclose(result.polygon, expected_support, atol=1e-9)
 
     def test_vanishing_error(self):
         self.assertAlmostEqual(

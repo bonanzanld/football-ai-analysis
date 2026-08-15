@@ -137,10 +137,23 @@ def main() -> None:
         minimum_acceptable_ratio=args.minimum_player_containment,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    partial_coverage = any(
+        not _is_full_field_support(
+            item.get("ground_support_polygon", ()),
+            profile.pitch_length_m,
+            profile.pitch_width_m,
+        )
+        for item in report["records"]
+        if item.get("ground_homography") is not None
+    )
+    aggregate_data = asdict(aggregate)
+    if partial_coverage:
+        aggregate_data["classification"] = "diagnostic_only_partial_coverage"
     args.output.write_text(json.dumps({
         "schema_version": 1, "diagnostic_only": True,
+        "partial_atlas_coverage": partial_coverage,
         "minimum_player_containment": args.minimum_player_containment,
-        "summary": summary, "clean_sequence": asdict(aggregate), "records": records,
+        "summary": summary, "clean_sequence": aggregate_data, "records": records,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     if args.preview is not None and previews:
         rows = []
@@ -152,8 +165,24 @@ def main() -> None:
         args.preview.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(args.preview), np.vstack(rows))
     print(f"Samenvatting: {summary}")
-    print(f"Schone reeks: {aggregate.classification}, {aggregate.acceptable_ratio:.1%} acceptabel")
+    print(
+        f"Schone reeks: {aggregate_data['classification']}, "
+        f"{aggregate.acceptable_ratio:.1%} acceptabel"
+    )
     print(f"Rapport: {args.output}")
+
+
+def _is_full_field_support(points, pitch_length_m, pitch_width_m) -> bool:
+    values = np.asarray(points, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] < 3 or values.shape[1] != 2:
+        return False
+    tolerance = 1e-6
+    return (
+        float(np.min(values[:, 0])) <= tolerance
+        and float(np.max(values[:, 0])) >= pitch_length_m - tolerance
+        and float(np.min(values[:, 1])) <= tolerance
+        and float(np.max(values[:, 1])) >= pitch_width_m - tolerance
+    )
 
 
 if __name__ == "__main__":

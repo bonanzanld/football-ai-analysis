@@ -100,16 +100,6 @@ class LocalFieldAtlasRuntime:
             )
         matrix = edge.source_to_target @ patch.ground_to_anchor
         matrix /= matrix[2, 2]
-        corners = np.asarray(
-            (
-                (0.0, 0.0),
-                (self.atlas.pitch_length_m, 0.0),
-                (self.atlas.pitch_length_m, self.atlas.pitch_width_m),
-                (0.0, self.atlas.pitch_width_m),
-            ),
-            dtype=np.float64,
-        )
-        polygon = _project(corners, matrix)
         support = _project(np.asarray(patch.support_polygon, dtype=np.float64), matrix)
         if (
             not np.all(np.isfinite(support))
@@ -137,7 +127,7 @@ class LocalFieldAtlasRuntime:
             patch_id,
             matrix,
             edge.source_to_target,
-            tuple(tuple(map(float, point)) for point in polygon),
+            tuple(tuple(map(float, point)) for point in support),
             recognition,
             edge.inliers,
             edge.inlier_ratio,
@@ -201,19 +191,13 @@ class LocalFieldAtlasRuntime:
                 "De temporeel voortgezette grondprojectie is niet convex.",
                 edge.inliers, edge.inlier_ratio, coverage,
             )
-        corners = np.asarray(
-            ((0.0, 0.0), (self.atlas.pitch_length_m, 0.0),
-             (self.atlas.pitch_length_m, self.atlas.pitch_width_m),
-             (0.0, self.atlas.pitch_width_m)), dtype=np.float64,
-        )
-        polygon = _project(corners, matrix)
         vanishing = matrix[:, 0].copy()
         if abs(float(vanishing[2])) < 1e-9:
             return self._failure(previous.patch_id, previous.recognition, "Verdwijnpunt ligt op oneindig.")
         vanishing /= vanishing[2]
         return AtlasRuntimeProjection(
             True, previous.patch_id, matrix, edge.source_to_target,
-            tuple(tuple(map(float, point)) for point in polygon),
+            tuple(tuple(map(float, point)) for point in support),
             previous.recognition, edge.inliers, edge.inlier_ratio, coverage,
             tuple(map(float, vanishing[:2])),
             "Veldvlak temporeel voortgezet vanaf het vorige videoframe.",

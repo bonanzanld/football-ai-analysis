@@ -16,7 +16,11 @@ if str(SRC) not in sys.path:
 
 from football_ai.calibration.lens_intrinsics_io import load_lens_intrinsics
 from football_ai.calibration.local_field_atlas import load_local_field_atlas
+from football_ai.calibration.fixed_camera_rotation import (
+    constrain_homography_to_camera_rotation,
+)
 from football_ai.calibration.global_frame_graph import (
+    FrameGraphEdge,
     FrameGraphNode,
     estimate_frame_edge,
     estimate_ground_frame_edge,
@@ -51,6 +55,13 @@ def main() -> None:
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     first = min(patches[item].anchor_frame for item in required)
     last = max(patches[item].anchor_frame for item in required)
+    minimum_x = max(min(point[0] for point in patches[name].support_polygon) for name in required)
+    maximum_x = min(max(point[0] for point in patches[name].support_polygon) for name in required)
+    if minimum_x >= maximum_x:
+        raise RuntimeError(
+            "Goal-A en Goal-B hebben bewust geen metrisch ondersteunde overlap; "
+            "voeg eerst een onafhankelijk middenveldvlak toe."
+        )
     transforms, graph_diagnostics = _connect_anchors(
         capture, lens, first, last, patches["goal-b"].anchor_frame, fps
     )
@@ -61,8 +72,6 @@ def main() -> None:
     if not ok:
         raise RuntimeError("Controleframe kon niet worden gelezen.")
     frame = cv2.undistort(raw, lens.camera_matrix, lens.distortion_coefficients)
-    minimum_x = max(min(point[0] for point in patches[name].support_polygon) for name in required)
-    maximum_x = min(max(point[0] for point in patches[name].support_polygon) for name in required)
     ground = np.asarray(
         [
             (x, y)
@@ -159,7 +168,16 @@ def _connect_anchors(capture, lens, first, last, reference_frame, fps):
                         source.node_id, target.node_id,
                         frames[source.node_id], frames[target.node_id],
                     )
-                edges.append(edge)
+                rotation = constrain_homography_to_camera_rotation(
+                    edge.source_to_target, lens.camera_matrix
+                )
+                edges.append(
+                    FrameGraphEdge(
+                        edge.source_id, edge.target_id, rotation, edge.matches,
+                        edge.inliers, edge.inlier_ratio, edge.source_coverage,
+                        edge.target_coverage, edge.median_error_px,
+                    )
+                )
             except ValueError:
                 pass
     reference_id = f"f{reference_frame}"

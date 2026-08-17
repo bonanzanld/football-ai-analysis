@@ -91,7 +91,7 @@ def main() -> None:
     vanishing_points, parallel_diagnostics = _goal_vanishing_points(
         video, structures, perspective, lens, seeds, parallel_reference
     )
-    overlap = 0.25 * profile.pitch_length_m
+    local_support_depth_m = min(12.0, 0.25 * profile.pitch_length_m)
     patches = []
     diagnostics = []
     for structure in structures:
@@ -149,9 +149,10 @@ def main() -> None:
             raise RuntimeError(f"Doel {structure.goal_id} levert geen lokaal cameravlak.")
         _score, swapped, estimate, corner_error = min(candidates, key=lambda item: item[0])
         if structure.goal_id == "A":
-            minimum_x, maximum_x = 0.0, profile.pitch_length_m / 2.0 + overlap / 2.0
+            minimum_x, maximum_x = 0.0, local_support_depth_m
         else:
-            minimum_x, maximum_x = profile.pitch_length_m / 2.0 - overlap / 2.0, profile.pitch_length_m
+            minimum_x = profile.pitch_length_m - local_support_depth_m
+            maximum_x = profile.pitch_length_m
         support = (
             (minimum_x, 0.0), (maximum_x, 0.0),
             (maximum_x, profile.pitch_width_m), (minimum_x, profile.pitch_width_m),
@@ -220,11 +221,6 @@ def main() -> None:
             tuple(corrected_endpoints[1]), effective_vanishing,
             front_sideline_points=sideline_points,
         )
-        if reflected:
-            reflection = _reflection_about_endline(
-                structure.goal_id, profile.pitch_length_m
-            )
-            ground_homography = ground_homography @ reflection
         patches.append(
             LocalFieldPatch(
                 f"goal-{goal}", structure.frame_number, ground_homography,
@@ -258,7 +254,7 @@ def main() -> None:
             f"zijlijn-RMS {sideline_rms:.2f}px | vertrouwen {confidence:.0%} | "
             f"palen omgewisseld={swapped} | vlak gespiegeld={reflected}"
         )
-    print(f"Overlapzone: {overlap:.1f}m rond het midden")
+    print(f"Lokale steun per doel: {local_support_depth_m:.1f}m vanaf de gemeten achterlijn")
     primary = parallel_reference.lines[0]
     print(
         f"11v11-richtingsanker ({primary.line_type}): frame {primary.frame_number} | "
@@ -271,21 +267,6 @@ def main() -> None:
             f"({diagnostic['difference_degrees']:.2f} graden)"
         )
     print(f"QA-preview: {preview_path}")
-
-
-def _reflection_about_endline(goal_id: str, pitch_length_m: float) -> np.ndarray:
-    """Reverse field depth without moving the owning physical end line."""
-    if goal_id not in ("A", "B"):
-        raise ValueError("Spiegeling vereist Doel A of Doel B.")
-    end_x = 0.0 if goal_id == "A" else float(pitch_length_m)
-    return np.asarray(
-        (
-            (-1.0, 0.0, 2.0 * end_x),
-            (0.0, 1.0, 0.0),
-            (0.0, 0.0, 1.0),
-        ),
-        dtype=np.float64,
-    )
 
 
 def _write_preview(video, atlas, lens, path):
